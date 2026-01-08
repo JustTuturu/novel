@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Scripts
-popupm.min.js
+popup.min.js
 
 # Virtual environments
 .venv
