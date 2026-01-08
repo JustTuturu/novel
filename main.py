@@ -1,39 +1,47 @@
-import asyncio
+import os
 import sys
-from scraper import QidianScraper
 from ocr_processor import OCRProcessor
 from cleaner import TextCleaner
 
-async def main(url):
-    print("Starting Qidian Chapter Extraction...")
-    
-    # 1. Scraping
-    scraper = QidianScraper()
-    image_paths = await scraper.capture_chapter(url)
-    
-    if not image_paths:
-        print("Failed to capture any screenshots.")
+def main(folder_path):
+    if not os.path.exists(folder_path):
+        print(f"Error: Folder '{folder_path}' does not exist.")
         return
 
-    # 2. OCR
-    processor = OCRProcessor()
-    raw_text = processor.process_images(image_paths)
+    print(f"--- Starting Manual OCR Workflow ---")
+    print(f"Folder: {folder_path}")
     
-    # 3. Cleaning
+    # 1. OCR Processing
+    print("\n[Stage 1/2] Recognizing text from images...")
+    processor = OCRProcessor()
+    raw_text = processor.process_folder(folder_path)
+    
+    if not raw_text:
+        print("Error: No text recognized or no images found in the folder.")
+        return
+
+    # 2. Cleaning
+    print("\n[Stage 2/2] Cleaning recognized text...")
     cleaner = TextCleaner()
     final_text = cleaner.clean(raw_text)
     
-    # 4. Save results
-    output_file = "chapter_output.txt"
+    # 3. Save results
+    output_dir = "outputs"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    folder_name = os.path.basename(os.path.normpath(folder_path))
+    output_file = os.path.join(output_dir, f"{folder_name}_cleaned.txt")
+    
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(final_text)
     
-    print(f"\nProcessing complete! Content saved to {output_file}")
+    print(f"\n--- Processing Complete! ---")
+    print(f"Result saved to: {output_file}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py <Qidian_Chapter_URL>")
+        print("Usage: python main.py <folder_containing_screenshots>")
     else:
-        chapter_url = sys.argv[1]
-        asyncio.run(main(chapter_url))
-        
+        folder_path = sys.argv[1]
+        main(folder_path)
