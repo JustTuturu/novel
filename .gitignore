@@ -6,9 +6,6 @@ dist/
 wheels/
 *.egg-info
 
-# Scripts
-popup.min.js
-
 # Virtual environments
 .venv
 
