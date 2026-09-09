@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.ruff_cache/
 
 # Virtual environments
 .venv
@@ -14,3 +15,7 @@ user_data/
 
 # OCR Models
 models/
+
+# Secrets
+.env
+/
