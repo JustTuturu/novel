@@ -137,6 +137,9 @@ def cmd_qq(args) -> int:
     from . import qq
 
     bid = qq._book_id_from(args.bid)
+    if args.login:
+        qq.login(bid, cid=args.cid, timeout_s=args.timeout)
+        return 0
     if args.probe_api:
         qq.probe_api(bid)
         return 0
@@ -176,6 +179,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_qq.add_argument("--start-cid", type=int, default=0, help="start from this chapter cid")
     p_qq.add_argument("--probe", action="store_true", help="dump one chapter + capture live API")
     p_qq.add_argument("--probe-api", action="store_true", help="show what the JSON API route needs")
+    p_qq.add_argument("--login", action="store_true", help="open a headed browser to save the full QQ session to outputs/qq_storage.json")
+    p_qq.add_argument("--cid", type=int, default=442, help="chapter cid to verify during --login (default 442)")
+    p_qq.add_argument("--timeout", type=int, default=600, help="seconds to wait for login (default 600)")
     p_qq.set_defaults(func=cmd_qq)
 
     return parser

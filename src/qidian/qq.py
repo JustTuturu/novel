@@ -14,8 +14,8 @@ import re
 
 import requests
 
-from .config import OUTPUT_DIR, qq_auth_cookies
-from .dom import DomExtractor
+from .config import OUTPUT_DIR, STORAGE_STATE, load_env, qq_auth_cookies
+from .dom import QQ_CONTENT_SELECTORS, DomExtractor
 
 # Confirmed via live capture on 2026-09-09: the web reader's catalog API.
 CHAPTERS_API = "https://book.qq.com/api/book/detail/chapters?bid={bid}"
@@ -76,15 +76,23 @@ def _cid_of(url: str) -> int:
 
 
 def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
-    cookies = qq_auth_cookies()
-    if not cookies:
-        print("No QQ_YWGUID/QQ_YWKEY (or QQ_COOKIE) set; VIP chapters stay locked.")
+    if STORAGE_STATE.exists():
+        cookies = None
+        storage_state = str(STORAGE_STATE)
+        print(f"Using saved session: {STORAGE_STATE.name}")
     else:
-        print(f"Auth: {len(cookies)} cookie(s) injected for .qq.com")
+        storage_state = None
+        cookies = qq_auth_cookies()
+        if not cookies:
+            print("No QQ_YWGUID/QQ_YWKEY (or QQ_COOKIE) set; VIP chapters stay locked.")
+            print("Tip: run `qidian qq --bid <id> --login` once to save a full session to")
+            print(f"  {STORAGE_STATE}")
+        else:
+            print(f"Auth: {len(cookies)} cookie(s) injected for .qq.com")
 
     book_url = f"https://book.qq.com/book-detail/{bid}/"
     ext = DomExtractor()
-    ext.start(cookies)
+    ext.start(cookies, storage_state=storage_state)
     try:
         if probe:
             chapters = ext.list_chapters(book_url)
@@ -156,6 +164,56 @@ def _probe(ext: DomExtractor, chapters: list[dict], bid: str):
         for path, sample in _content_field_candidates(body):
             print(f"    {path}: {sample!r}")
         print(f"    (top-level keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__})")
+
+
+def login(bid: str = "46077914", cid: int = 442, timeout_s: int = 600) -> bool:
+    """Open a headed browser; once the user logs in with an account that owns
+    the book, and the given chapter's body becomes readable, save the full
+    session to STORAGE_STATE for reuse by `qidian qq`."""
+    load_env()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    url = f"https://book.qq.com/book-read/{bid}/{cid}"
+
+    ext = DomExtractor()
+    ext.start(qq_auth_cookies(), headless=False)
+    p = ext.page
+    try:
+        p.goto("https://book.qq.com/", wait_until="domcontentloaded", timeout=60000)
+        p.wait_for_timeout(2000)
+        print("[login] Browser opened. Log in with an account that can read")
+        print(f"[login]   book {bid} cid {cid} ({url})")
+        print("[login] Watching for the chapter body to become readable...", flush=True)
+
+        import time
+
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                p.goto(url, wait_until="domcontentloaded", timeout=30000)
+                p.wait_for_timeout(4000)
+                # The body may be font-obfuscated, so "readable" is signaled by
+                # the content container carrying real HTML (not by plaintext).
+                for sel in QQ_CONTENT_SELECTORS:
+                    try:
+                        h = p.inner_html(sel)
+                    except Exception:
+                        continue
+                    if h and len(h) > 200:
+                        ctx = p.context
+                        ctx.storage_state(path=str(STORAGE_STATE))
+                        print(f"[login] Chapter container present ({len(h)} bytes HTML).")
+                        print(f"[login] Session saved to {STORAGE_STATE}"
+                              f" ({len(ctx.cookies())} cookies).")
+                        return True
+            except Exception:
+                pass
+            print("  ...not readable yet, still waiting", flush=True)
+            p.wait_for_timeout(5000)
+
+        print("[login] Timed out before the chapter became readable.")
+        return False
+    finally:
+        ext.close()
 
 
 def probe_api(bid: str):

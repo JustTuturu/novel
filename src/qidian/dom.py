@@ -6,6 +6,7 @@ glyphs in <samp> cannot be recovered without the font file — those
 chapters are marked as needing OCR.
 """
 
+import os
 import pathlib
 import re
 import time
@@ -17,7 +18,45 @@ from playwright.sync_api import sync_playwright
 
 PUA_RE = re.compile(r"[\ue000-\uf8ff]")
 
-BINARY = "/home/suzu/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
+# Use real Brave (not the bundled Chromium) so the site can't fingerprint the
+# automation binary. Override with QQ_BROWSER env. Falls back to bundled Chromium.
+_BRAVE = "/opt/brave.com/brave-origin/brave"
+BINARY = (
+    os.environ.get("QQ_BROWSER")
+    or (_BRAVE if os.path.exists(_BRAVE) else None)
+    or "/home/suzu/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
+)
+
+# Comprehensive anti-detection: hide automation fingerprints the site's JS
+# checks (navigator.webdriver, plugins, languages, hardware concurrency,
+# headless UA, missing Chrome properties).
+STEALTH_JS = """
+(() => {
+  const ua = navigator.userAgent.replace(/HeadlessChrom(e|ium)\\/\\d+/g, '');
+  Object.defineProperty(navigator, 'userAgent', { get: () => ua, enumerable: true });
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined, enumerable: true });
+  Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, enumerable: true });
+  const plugins = ['Chrome PDF Viewer','Chrome PDF','Skype for Business','Native Client','Google Docs','Google Drive','Google Hangouts','YouTube'];
+  Object.defineProperty(navigator, 'plugins', { get: () => plugins, enumerable: true });
+  if (Object.getOwnPropertyDescriptor(navigator, 'languages') === undefined) {
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN','zh','en-US','en'], enumerable: true });
+  }
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, enumerable: true });
+  const screenValues = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, pixelDepth: 24 };
+  for (const [k, v] of Object.entries(screenValues)) {
+    try { Object.defineProperty(screen, k, { get: () => v, enumerable: true }); } catch (e) {}
+  }
+  // Chrome-specific markers real installs have.
+  window.chrome = window.chrome || { loadTimes: {}, runtime: {} };
+  try {
+    const gpu = { deviceId: 0x0001, vendorId: 0x10de, deviceString: 'NVIDIA GeForce RTX 3060' };
+    const webgl = document.createElement('canvas').getContext('webgl');
+    if (webgl) {
+      Object.defineProperty(webgl, 'getRendererInfoString', { value: () => 'NVIDIA GeForce RTX 3060' });
+    }
+  } catch (e) {}
+})();
+"""
 
 QIDIAN_SELECTORS = [
     "main.content",
@@ -50,36 +89,42 @@ class DomExtractor:
         self._browser = None
         self._page = None
 
-    def start(self, cookies: list[dict] | None = None):
+    def start(self, cookies: list[dict] | None = None, *, storage_state: str | None = None, headless: bool = True):
         self._playwright = sync_playwright().start()
+        launch_args = []
+        if headless:
+            launch_args = ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
         self._browser = self._playwright.chromium.launch(
-            headless=True,
+            headless=headless,
             executable_path=BINARY,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=launch_args,
         )
-        context = self._browser.new_context(
-            viewport={"width": 1366, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/127.0.0.0 Safari/537.36"
-            ),
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
+        # Real Chrome-family tab defaults (Brave uses a plain Chrome UA string).
+        ua = (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
         )
-        if cookies:
+        if storage_state:
+            context = self._browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=ua,
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                storage_state=storage_state,
+            )
+        else:
+            context = self._browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=ua,
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+        if cookies and not storage_state:
             try:
-                context.add_cookies(cookies)
+                context.add_cookies(cookies)  # type: ignore[arg-type]
             except PwError:
                 pass
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined })"
-        )
+        context.add_init_script(STEALTH_JS)
         self._page = context.new_page()
         return context
 
@@ -210,8 +255,10 @@ class DomExtractor:
     def _decrypt_node(self, node) -> str:
         """Recursively decrypt a node using attribute-based font obfuscation.
 
-        For tags with attributes containing single CJK characters, the attribute
-        value is the real text. For other nodes, children are processed recursively.
+        A tag whose attributes carry single CJK characters holds the real
+        plaintext there (Layer 2); its *visible* text is the font-mapped decoy
+        (Layer 1) and must be dropped, not kept. Other nodes recurse into
+        children so their plaintext attributes are also picked up.
         """
         if isinstance(node, str):
             return node
@@ -219,6 +266,10 @@ class DomExtractor:
         if node.name == "br":
             return "\n"
 
+        # Layer 2: any single-CJK attribute value is real plaintext. Grab the
+        # first one as the char this tag displays, and DROP the visible text
+        # (which is the Layer-1 font-mapped decoy). Multi-attr tags carry the
+        # plaintext in the first attr plus decoy/alt glyphs in the rest.
         for attr_val in node.attrs.values():
             if isinstance(attr_val, str) and len(attr_val) == 1:
                 cp = ord(attr_val)
@@ -316,28 +367,31 @@ class DomExtractor:
         dom_text = ""
         for sel in selectors:
             try:
-                t = page.text_content(sel)
-                if t and len(t.strip()) > 20:
-                    dom_text = t.strip()
-                    dom_html = page.inner_html(sel)
-                    break
+                h = page.inner_html(sel)
+                if h and len(h) > 40:
+                    dom_html = h
+                    try:
+                        dom_text = (page.text_content(sel) or "").strip()
+                    except PwError:
+                        dom_text = ""
+                    if dom_text or is_qq:
+                        break
             except PwError:
                 continue
 
-        if not dom_text:
-            return {"title": title, "text": "", "source": "dom"}
-
-        # For QQ Books: try attribute-based decryption first
+        # QQ Books: attribute-based decryption (Layer 2) is the primary path.
+        # The container HTML carries the plaintext inside random-named tag
+        # attributes even when the rendered text is font-mapped (Layer 1), so
+        # text_content() must NOT gate us here.
         if is_qq:
-            decrypted = self._decrypt_html(dom_html)
-            obf = _detect_obfuscation(decrypted)
-            if decrypted and len(decrypted) > 20 and not obf["obfuscated"]:
+            if dom_html:
+                decrypted = self._decrypt_html(dom_html)
                 cleaned = self._clean_dom_text(decrypted, is_qq=True)
-                if expected_word_count > 200 and len(cleaned) < expected_word_count * 0.3:
-                    return {"title": title, "text": cleaned, "source": "dom", "locked": True}
-                return {"title": title, "text": cleaned, "source": "dom"}
-            # If decrypted text is still PUA-heavy, fall back to OCR
-            return {"title": title, "text": "", "source": "ocr_needed"}
+                if len(cleaned) > 20:
+                    if expected_word_count > 200 and len(cleaned) < expected_word_count * 0.3:
+                        return {"title": title, "text": cleaned, "source": "dom", "locked": True}
+                    return {"title": title, "text": cleaned, "source": "dom"}
+            return {"title": title, "text": "", "source": "dom"}
 
         # For Qidian: check for obfuscation
         obf = _detect_obfuscation(dom_text)

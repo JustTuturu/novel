@@ -18,4 +18,5 @@ models/
 
 # Secrets
 .env
+outputs/qq_storage.json
 /

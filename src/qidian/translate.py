@@ -2,12 +2,13 @@
 
 import re
 import time
+from typing import ClassVar
 
 import requests
 
 
 class Translator:
-    NAME_MAP = {
+    NAME_MAP: ClassVar[dict[str, str]] = {
         "墨画": "Mo Hua",
         "安小富": "An Xiaofu",
         "安少爷": "An Xiaofu",
@@ -54,7 +55,7 @@ class Translator:
         safe, reverse = self._replace_names(para)
         try:
             translated = self._gt(safe)
-        except Exception as e:
+        except (requests.RequestException, ValueError) as e:
             if on_error:
                 print(f"  ERROR: {e}")
             return para
