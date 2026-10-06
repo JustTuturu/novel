@@ -138,12 +138,13 @@ def cmd_bookqq(args) -> int:
 
     bid = bookqq._book_id_from(args.bid)
     if args.login:
-        bookqq.login(bid, cid=args.cid, timeout_s=args.timeout)
+        bookqq.login(bid, cid=args.cid, timeout_s=args.timeout, cdp=args.cdp)
         return 0
     if args.probe_api:
         bookqq.probe_api(bid)
         return 0
-    bookqq.run(bid, limit=args.limit, start_cid=args.start_cid, probe=args.probe)
+    bookqq.run(bid, limit=args.limit, start_cid=args.start_cid,
+               probe=args.probe, cdp=args.cdp)
     return 0
 
 
@@ -182,6 +183,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bqq.add_argument("--login", action="store_true", help="open a headed browser to save the full QQ session to outputs/qq_storage.json")
     p_bqq.add_argument("--cid", type=int, default=442, help="chapter cid to verify during --login (default 442)")
     p_bqq.add_argument("--timeout", type=int, default=600, help="seconds to wait for login (default 600)")
+    p_bqq.add_argument("--cdp", default=None, metavar="URL",
+                       help="attach to your real browser via CDP, e.g. http://localhost:9222 "
+                            "(start it with: brave --remote-debugging-port=9222); "
+                            "bypasses the automation detection that blanks VIP chapters")
     p_bqq.set_defaults(func=cmd_bookqq)
 
     return parser

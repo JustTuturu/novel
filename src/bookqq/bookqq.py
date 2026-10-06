@@ -154,15 +154,27 @@ def _cid_of(url: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
-    cookies = None
+def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False,
+        cdp: str | None = None):
+    storage_state = None
     http_cookies: dict[str, str] = {}
-    if STORAGE_STATE.exists():
+    ext: DomExtractor | None = None
+    if cdp:
+        # Attach to the user's REAL browser: it already has the session and
+        # is not subject to the automation-detection the Fock lib does.
+        print(f"Attaching to real browser via CDP: {cdp}")
+        ext = DomExtractor()
+        ext.attach(cdp)
+        http_cookies = {
+            c["name"]: c["value"]
+            for c in ext.context.cookies("https://book.qq.com")
+        }
+        print(f"  real session: {len(http_cookies)} cookies harvested for HTTP fast path")
+    elif STORAGE_STATE.exists():
         storage_state = str(STORAGE_STATE)
         http_cookies = _cookies_from_storage(storage_state)
         print(f"Using saved session: {STORAGE_STATE.name}")
     else:
-        storage_state = None
         cookies = qq_auth_cookies()
         if not cookies:
             print("No QQ_YWGUID/QQ_YWKEY (or QQ_COOKIE) set; VIP chapters stay locked.")
@@ -176,7 +188,6 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
     # Decryptor reuses the attribute-deobfuscation/cleaning helpers; start()
     # is deferred so no Chromium launches while the HTTP fast path succeeds.
     decryptor = DomExtractor()
-    ext = None
 
     def get_ext() -> DomExtractor:
         nonlocal ext
@@ -265,51 +276,85 @@ def _probe(ext: DomExtractor, chapters: list[dict], bid: str):
         print(f"    (top-level keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__})")
 
 
-def login(bid: str = "46077914", cid: int = 442, timeout_s: int = 600) -> bool:
+def login(bid: str = "46077914", cid: int = 442, timeout_s: int = 600,
+          cdp: str | None = None) -> bool:
     """Open a headed browser; once the user logs in with an account that owns
     the book, and the given chapter's body becomes readable, save the full
-    session to STORAGE_STATE for reuse by `bookqq`."""
+    session to STORAGE_STATE for reuse by `bookqq`.
+
+    With `cdp`, attach to the user's REAL browser instead of launching one:
+    log in there manually, open the chapter, and this only watches + saves.
+    The browser is never navigated remotely: open the chapter once, then
+    passively poll all open tabs so the user can log in / purchase at will.
+    """
     load_env()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     url = f"https://book.qq.com/book-read/{bid}/{cid}"
 
     ext = DomExtractor()
-    ext.start(qq_auth_cookies(), headless=False)
-    p = ext.page
+    if cdp:
+        print(f"Attaching to real browser via CDP: {cdp}")
+        ext.attach(cdp)
+        print(f"[login] Watching tabs of YOUR browser for chapter {bid}/{cid}...")
+        print("[login] Log in and open the chapter there; the session is saved")
+        print("[login] automatically once text appears. This terminal just waits.",
+              flush=True)
+    else:
+        ext.start(qq_auth_cookies(), headless=False)
+        p = ext.page
+        try:
+            p.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"[login] Could not open {url}: {type(e).__name__}: {e}")
+        print("[login] Browser opened at the target chapter. In THIS browser:")
+        print("[login]   1. log in with an account that can read the chapter")
+        print("[login]   2. if needed, buy/subscribe it")
+        print("[login]   3. the session is saved automatically once text appears")
+        print("[login] Leave this terminal running; you can browse freely.", flush=True)
     try:
-        p.goto("https://book.qq.com/", wait_until="domcontentloaded", timeout=60000)
-        p.wait_for_timeout(2000)
-        print("[login] Browser opened. Log in with an account that can read")
-        print(f"[login]   book {bid} cid {cid} ({url})")
-        print("[login] Watching for the chapter body to become readable...", flush=True)
+        def _readable(pg) -> int:
+            # The body may be font-obfuscated, so "readable" is signaled by the
+            # content container carrying real HTML (not by plaintext).
+            for sel in QQ_CONTENT_SELECTORS:
+                try:
+                    h = pg.inner_html(sel)
+                except Exception:
+                    continue
+                if h and len(h) > 200:
+                    return len(h)
+            return 0
 
         import time
 
         deadline = time.time() + timeout_s
+        notified = False
         while time.time() < deadline:
+            # Poll every open tab: the user may log in through other pages.
+            pages = []
             try:
-                p.goto(url, wait_until="domcontentloaded", timeout=30000)
-                p.wait_for_timeout(4000)
-                # The body may be font-obfuscated, so "readable" is signaled by
-                # the content container carrying real HTML (not by plaintext).
-                for sel in QQ_CONTENT_SELECTORS:
-                    try:
-                        h = p.inner_html(sel)
-                    except Exception:
-                        continue
-                    if h and len(h) > 200:
-                        ctx = p.context
-                        ctx.storage_state(path=str(STORAGE_STATE))
-                        print(f"[login] Chapter container present ({len(h)} bytes HTML).")
-                        print(f"[login] Session saved to {STORAGE_STATE}"
-                              f" ({len(ctx.cookies())} cookies).")
-                        return True
+                pages = list(ext.context.pages)
             except Exception:
                 pass
-            print("  ...not readable yet, still waiting", flush=True)
-            p.wait_for_timeout(5000)
+            for pg in pages:
+                size = _readable(pg)
+                if size:
+                    ctx = pg.context
+                    ctx.storage_state(path=str(STORAGE_STATE))
+                    print(f"\n[login] Chapter container present ({size} bytes HTML)")
+                    print(f"[login]   on {pg.url}")
+                    print(f"[login] Session saved to {STORAGE_STATE}"
+                          f" ({len(ctx.cookies())} cookies).")
+                    return True
+            if not notified and time.time() > deadline - 60:
+                print("[login] One minute left before timeout.", flush=True)
+                notified = True
+            time.sleep(3)
 
         print("[login] Timed out before the chapter became readable.")
+        return False
+    except Exception as e:
+        print(f"[login] Stopped: {type(e).__name__}: {e}")
+        print("[login] (If the browser was closed early, nothing was saved.)")
         return False
     finally:
         ext.close()

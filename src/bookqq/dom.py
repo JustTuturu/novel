@@ -88,16 +88,26 @@ class DomExtractor:
         self._playwright = None
         self._browser = None
         self._page = None
+        self._attached = False  # True when attached via CDP (never kill the browser)
 
     def start(self, cookies: list[dict] | None = None, *, storage_state: str | None = None, headless: bool = True):
         self._playwright = sync_playwright().start()
-        launch_args = []
+        # Scrub automation fingerprints Playwright adds at the binary level:
+        # - --enable-automation turns on navigator.webdriver and the infobar
+        # - --disable-blink-features=AutomationControlled keeps Blink honest
+        launch_args = ["--disable-blink-features=AutomationControlled"]
         if headless:
-            launch_args = ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+            launch_args += ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
         self._browser = self._playwright.chromium.launch(
             headless=headless,
             executable_path=BINARY,
             args=launch_args,
+            ignore_default_args=[
+                "--enable-automation",
+                "--disable-component-extensions-with-background-pages",
+                "--use-mock-keychain",
+                "--password-store=basic",
+            ],
         )
         # Real Chrome-family tab defaults (Brave uses a plain Chrome UA string).
         ua = (
@@ -128,7 +138,49 @@ class DomExtractor:
         self._page = context.new_page()
         return context
 
+    def attach(self, cdp_url: str):
+        """Attach to an already-running real browser over CDP.
+
+        The site then sees the user's genuine browser (fingerprint, extensions,
+        real login) — no stealth needed and Fock anti-piracy behaves normally.
+        Never closes the user's browser on close().
+        """
+        self._attached = True
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.connect_over_cdp(
+            cdp_url, timeout=30000
+        )
+        ctx = (
+            self._browser.contexts[0]
+            if self._browser.contexts
+            else self._browser.new_context()
+        )
+        self._page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return ctx
+
+    @property
+    def attached(self) -> bool:
+        return self._attached
+
+    @property
+    def context(self):
+        if not self._page:
+            raise RuntimeError("Call start()/attach() first")
+        return self._page.context
+
     def close(self):
+        if self._attached:
+            # Never kill the user's real browser; just disconnect.
+            if self._playwright:
+                try:
+                    self._playwright.stop()
+                except PwError:
+                    self._playwright = None
+                self._playwright = None
+            self._browser = None
+            self._page = None
+            self._attached = False
+            return
         if self._browser:
             try:
                 self._browser.close()
