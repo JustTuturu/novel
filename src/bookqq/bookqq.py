@@ -10,15 +10,94 @@ Auth (read from .env or env — see bookqq.config.qq_auth_cookies):
   QQ_COOKIE             -> optional: full raw Cookie string, overrides the above
 """
 
+import json
+import pathlib
 import re
 
 import requests
+from bs4 import BeautifulSoup
 
 from .config import OUTPUT_DIR, STORAGE_STATE, load_env, qq_auth_cookies
 from .dom import QQ_CONTENT_SELECTORS, DomExtractor
 
 # Confirmed via live capture on 2026-09-09: the web reader's catalog API.
 CHAPTERS_API = "https://book.qq.com/api/book/detail/chapters?bid={bid}"
+
+# Mirrors ggetHtmlDOM (GM_xmlhttpRequest): browser-like headers so the SSR page
+# renders identically; cookies are attached per-request below.
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://book.qq.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+_LOCK_MARKERS = ("登录订阅本章", "订阅本章", "上QQ阅读APP看后续精彩内容")
+
+
+def _cookies_from_storage(path) -> dict[str, str]:
+    """Extract qq.com cookies (name -> value) from a Playwright storage state."""
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {
+        c["name"]: c["value"]
+        for c in data.get("cookies", [])
+        if "qq.com" in (c.get("domain") or "")
+        and c.get("name") in ("ywguid", "ywkey", "ywsession")
+    }
+
+
+def _qq_title(soup) -> str:
+    # novel-downloader qqbook.ts: title from h1.chapter-title
+    node = soup.select_one("h1.chapter-title") or soup.select_one("h1")
+    if node is None:
+        return "Untitled"
+    return node.get_text(strip=True).split("\n")[0].strip() or "Untitled"
+
+
+def _http_chapter(chapter_url: str, cookies: dict[str, str], *, is_vip: bool, decryptor: DomExtractor):
+    """Fast path mirroring novel-downloader's qqbook.ts fetch order.
+
+    Plain authenticated GET of the SSR chapter page; for VIP chapters the
+    response is only trusted when `#article` exists with >= 10 element
+    children (the `childElementCount < 10` check). Returns a chapter result
+    dict, or None to signal fallback to the Playwright DOM path (the
+    equivalent of qqbook.ts's iframe fallback).
+    """
+    if not cookies:
+        return None
+    try:
+        r = requests.get(
+            chapter_url, headers=_HTTP_HEADERS, cookies=cookies, timeout=15
+        )
+        r.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    title = _qq_title(soup)
+    body_text = soup.get_text(" ", strip=True)
+    if any(marker in body_text for marker in _LOCK_MARKERS):
+        return {"title": title, "text": "", "source": "http", "locked": True}
+
+    article = soup.select_one("#article") or soup.select_one("div.chapter-content")
+    if article is None:
+        return None
+    if is_vip:
+        # Only trust the HTTP path for VIP when the SSR body is fully rendered.
+        element_children = [c for c in article.children if getattr(c, "name", None)]
+        if len(element_children) < 10:
+            return None
+
+    decrypted = decryptor._decrypt_html(str(article))
+    cleaned = decryptor._clean_dom_text(decrypted, is_qq=True)
+    if len(cleaned) <= 20:
+        return None
+    return {"title": title, "text": cleaned, "source": "http"}
 
 
 def _book_id_from(bid_or_url: str) -> str:
@@ -76,9 +155,11 @@ def _cid_of(url: str) -> int:
 
 
 def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
+    cookies = None
+    http_cookies: dict[str, str] = {}
     if STORAGE_STATE.exists():
-        cookies = None
         storage_state = str(STORAGE_STATE)
+        http_cookies = _cookies_from_storage(storage_state)
         print(f"Using saved session: {STORAGE_STATE.name}")
     else:
         storage_state = None
@@ -88,17 +169,28 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
             print("Tip: run `bookqq --bid <id> --login` once to save a full session to")
             print(f"  {STORAGE_STATE}")
         else:
+            http_cookies = {c["name"]: c["value"] for c in cookies}
             print(f"Auth: {len(cookies)} cookie(s) injected for .qq.com")
 
     book_url = f"https://book.qq.com/book-detail/{bid}/"
-    ext = DomExtractor()
-    ext.start(cookies, storage_state=storage_state)
+    # Decryptor reuses the attribute-deobfuscation/cleaning helpers; start()
+    # is deferred so no Chromium launches while the HTTP fast path succeeds.
+    decryptor = DomExtractor()
+    ext = None
+
+    def get_ext() -> DomExtractor:
+        nonlocal ext
+        if ext is None:
+            ext = DomExtractor()
+            ext.start(cookies, storage_state=storage_state)
+        return ext
+
     try:
         if probe:
-            chapters = ext.list_chapters(book_url)
-            return _probe(ext, chapters, bid)
+            chapters = catalog_via_api(bid) or get_ext().list_chapters(book_url)
+            return _probe(get_ext(), chapters, bid)
 
-        chapters = catalog_via_api(bid) or ext.list_chapters(book_url)
+        chapters = catalog_via_api(bid) or get_ext().list_chapters(book_url)
         if not chapters:
             print("No chapters found.")
             return
@@ -112,7 +204,12 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
         combined = []
         for ch in chapters:
             print(f"  Ch {ch['num']}: {ch['title']}...", end="", flush=True)
-            result = ext.extract_chapter(ch["url"])
+            result = _http_chapter(
+                ch["url"], http_cookies,
+                is_vip=bool(ch.get("is_vip")), decryptor=decryptor,
+            )
+            if result is None:
+                result = get_ext().extract_chapter(ch["url"])
             if result.get("locked"):
                 print(" LOCKED (cookie expired / not entitled)")
                 continue
@@ -121,7 +218,8 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
                 cid = _cid_of(ch["url"])
             out = OUTPUT_DIR / f"qqbook_{bid}_ch{cid}.txt"
             out.write_text(f"# {result['title']}\n{result['text']}", encoding="utf-8")
-            print(f" {len(result['text'])} chars -> {out.name}")
+            src = " [http]" if result.get("source") == "http" else ""
+            print(f" {len(result['text'])} chars{src} -> {out.name}")
             combined.append(f"# {result['title']}\n{result['text']}")
 
         if combined:
@@ -129,7 +227,8 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
             merged.write_text("\n\n".join(combined), encoding="utf-8")
             print(f"\nMerged -> {merged}")
     finally:
-        ext.close()
+        if ext is not None:
+            ext.close()
 
 
 def _probe(ext: DomExtractor, chapters: list[dict], bid: str):

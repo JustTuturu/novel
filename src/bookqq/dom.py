@@ -456,6 +456,8 @@ class DomExtractor:
         text = re.sub(r"^书友\d+[^\n]*", "", text, flags=re.MULTILINE)
         if is_qq:
             text = re.sub(r"请下载QQ阅读[^\n]*", "", text)
+            # novel-downloader qqbook.ts rm2 filter: 谷X ad paragraphs
+            text = re.sub(r"^谷[\u4e00-\u9fa5]{0,1}$", "", text, flags=re.MULTILINE)
             text = re.sub(r"^.*本章字数：\d+字.*$", "", text, flags=re.MULTILINE)
             text = re.sub(r"^.*更新时间：[\d\-\s:]+\d+.*$", "", text, flags=re.MULTILINE)
         text = re.sub(r"\n{3,}", "\n\n", text)
