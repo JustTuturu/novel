@@ -1,12 +1,13 @@
 [project]
-name = "qidian"
+name = "bookqq"
 version = "0.2.0"
 description = "Extract, clean, and translate Chinese web-novel chapters (Qidian / QQ阅读)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "opencv-python>=4.12.0.88",
-    "easyocr>=1.6.2",
+    "paddleocr>=2.0.1",
+    "paddlepaddle>=3.2.0",
     "torch>=2.2.0",
     "playwright>=1.60.0",
     "beautifulsoup4>=4.15.0",
@@ -16,11 +17,15 @@ dependencies = [
 ]
 
 [project.scripts]
-qidian = "qidian.cli:main"
+bookqq = "bookqq.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/qidian"]
+packages = ["src/bookqq"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

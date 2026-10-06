@@ -1,10 +1,10 @@
-"""Unified `qidian` command-line interface.
+"""Unified `bookqq` command-line interface.
 
 Subcommands:
   ocr        OCR a folder of chapter screenshots -> cleaned text file
-  extract    Extract a book/chapter from Qidian or QQ阅读 (DOM)
+  extract    Extract a book/chapter from QQ阅读 or Qidian (DOM)
   translate  Translate an extracted text file (zh -> vi)
-  qq         VIP QQ阅读 downloader (cookie-authenticated)
+  bookqq     VIP QQ阅读 downloader (cookie-authenticated)
 """
 
 import argparse
@@ -109,7 +109,7 @@ def cmd_extract(args) -> int:
             all_text.append(f"# {result['title']}\n{result['text']}")
 
         combined = "\n\n".join(all_text)
-        safe_name = args.url.strip("/").split("/")[-2] if "/" in args.url else "qidian_book"
+        safe_name = args.url.strip("/").split("/")[-2] if "/" in args.url else "bookqq_book"
         output_file = os.path.join(args.output_dir, f"{safe_name}.txt")
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(combined)
@@ -133,17 +133,17 @@ def cmd_translate(args) -> int:
 # --- qq VIP -------------------------------------------------------------
 
 
-def cmd_qq(args) -> int:
-    from . import qq
+def cmd_bookqq(args) -> int:
+    from . import bookqq
 
-    bid = qq._book_id_from(args.bid)
+    bid = bookqq._book_id_from(args.bid)
     if args.login:
-        qq.login(bid, cid=args.cid, timeout_s=args.timeout)
+        bookqq.login(bid, cid=args.cid, timeout_s=args.timeout)
         return 0
     if args.probe_api:
-        qq.probe_api(bid)
+        bookqq.probe_api(bid)
         return 0
-    qq.run(bid, limit=args.limit, start_cid=args.start_cid, probe=args.probe)
+    bookqq.run(bid, limit=args.limit, start_cid=args.start_cid, probe=args.probe)
     return 0
 
 
@@ -152,7 +152,7 @@ def cmd_qq(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="qidian",
+        prog="bookqq",
         description="Extract, clean, and translate Chinese web-novel chapters.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -173,16 +173,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_t.add_argument("output", nargs="?", default=None, help="output file (default: <input>_vi.txt)")
     p_t.set_defaults(func=cmd_translate)
 
-    p_qq = sub.add_parser("qq", help="VIP QQ阅读 downloader (cookie-authenticated)")
-    p_qq.add_argument("--bid", required=True, help="QQ阅读 book id (or book url)")
-    p_qq.add_argument("--limit", type=int, default=0, help="max chapters")
-    p_qq.add_argument("--start-cid", type=int, default=0, help="start from this chapter cid")
-    p_qq.add_argument("--probe", action="store_true", help="dump one chapter + capture live API")
-    p_qq.add_argument("--probe-api", action="store_true", help="show what the JSON API route needs")
-    p_qq.add_argument("--login", action="store_true", help="open a headed browser to save the full QQ session to outputs/qq_storage.json")
-    p_qq.add_argument("--cid", type=int, default=442, help="chapter cid to verify during --login (default 442)")
-    p_qq.add_argument("--timeout", type=int, default=600, help="seconds to wait for login (default 600)")
-    p_qq.set_defaults(func=cmd_qq)
+    p_bqq = sub.add_parser("bookqq", help="VIP QQ阅读 downloader (cookie-authenticated)")
+    p_bqq.add_argument("--bid", required=True, help="QQ阅读 book id (or book url)")
+    p_bqq.add_argument("--limit", type=int, default=0, help="max chapters")
+    p_bqq.add_argument("--start-cid", type=int, default=0, help="start from this chapter cid")
+    p_bqq.add_argument("--probe", action="store_true", help="dump one chapter + capture live API")
+    p_bqq.add_argument("--probe-api", action="store_true", help="show what the JSON API route needs")
+    p_bqq.add_argument("--login", action="store_true", help="open a headed browser to save the full QQ session to outputs/qq_storage.json")
+    p_bqq.add_argument("--cid", type=int, default=442, help="chapter cid to verify during --login (default 442)")
+    p_bqq.add_argument("--timeout", type=int, default=600, help="seconds to wait for login (default 600)")
+    p_bqq.set_defaults(func=cmd_bookqq)
 
     return parser
 

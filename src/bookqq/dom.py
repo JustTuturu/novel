@@ -169,9 +169,12 @@ class DomExtractor:
             f"https://m.qidian.com/book/{book_id}/catalog",
         ]
 
+    def _lock_is_vip(self, row) -> bool:
+        """novel-downloader QQBook rule: VIP = row contains a `.lock` icon."""
+        return row.select_one(".lock") is not None
+
     def list_chapters(self, book_url: str, max_chapters: int = 0):
         page = self.page
-        used_url = ""
         items = []
 
         is_qq = self._is_qq(book_url)
@@ -202,20 +205,43 @@ class DomExtractor:
                 items = []
 
                 if is_qq:
+                    # QQBook rule (novel-downloader): the full chapter list
+                    # lives in the second .tab-panel's second .book-dir, as
+                    # li.list rows; VIP = row has a .lock icon.
+                    rows = soup.select(".tab-panel:nth-of-type(2) .book-dir:nth-of-type(2) li.list") or soup.select("li.list")
                     seen_urls = set()
-                    for a in soup.select("a[href*='/book-read/']"):
-                        href = str(a.get("href") or "")
-                        if not href.startswith("http"):
-                            href = "https:" + href if href.startswith("//") else "https://book.qq.com" + href
-                        if href in seen_urls:
-                            continue
-                        seen_urls.add(href)
-                        items.append({
-                            "title": a.text.strip(),
-                            "url": href,
-                            "is_vip": False,
-                            "wordCount": 0,
-                        })
+                    if rows:
+                        for s in rows:
+                            a = s.select_one("a")
+                            if a is None:
+                                continue
+                            href = str(a.get("href") or "")
+                            if not href.startswith("http"):
+                                href = "https:" + href if href.startswith("//") else "https://book.qq.com" + href
+                            if href in seen_urls:
+                                continue
+                            seen_urls.add(href)
+                            items.append({
+                                "title": a.text.strip(),
+                                "url": href,
+                                "is_vip": self._lock_is_vip(s),
+                                "wordCount": 0,
+                            })
+                    if not items:
+                        # Fallback: original selector sweep across any link.
+                        for a in soup.select("a[href*='/book-read/']"):
+                            href = str(a.get("href") or "")
+                            if not href.startswith("http"):
+                                href = "https:" + href if href.startswith("//") else "https://book.qq.com" + href
+                            if href in seen_urls:
+                                continue
+                            seen_urls.add(href)
+                            items.append({
+                                "title": a.text.strip(),
+                                "url": href,
+                                "is_vip": False,
+                                "wordCount": 0,
+                            })
                 else:
                     for li in soup.select("li.chapter-item"):
                         a = li.select_one("a.chapter-name")
@@ -238,12 +264,11 @@ class DomExtractor:
                         })
 
                 if items:
-                    used_url = url
                     break
             except PwError:
                 continue
 
-        if not used_url:
+        if not items:
             raise RuntimeError(f"No chapters found for {book_url}")
 
         print(f"  Catalog loaded ({len(items)} chapters)")

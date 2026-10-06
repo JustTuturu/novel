@@ -4,7 +4,7 @@ Unlocks VIP chapters by injecting QQ reading cookies (ywguid/ywkey) into a
 Playwright Chromium context, then reuses the SSR `book-read` DOM path from
 `.dom`. Output lands in `outputs/qqbook_{bid}_ch{cid}.txt`.
 
-Auth (read from .env or env — see qidian.config.qq_auth_cookies):
+Auth (read from .env or env — see bookqq.config.qq_auth_cookies):
   QQ_YWGUID, QQ_YWKEY   -> ywguid / ywkey cookie values
   QQ_YWSESSION          -> optional ywsession cookie value
   QQ_COOKIE             -> optional: full raw Cookie string, overrides the above
@@ -85,7 +85,7 @@ def run(bid: str, *, limit: int = 0, start_cid: int = 0, probe: bool = False):
         cookies = qq_auth_cookies()
         if not cookies:
             print("No QQ_YWGUID/QQ_YWKEY (or QQ_COOKIE) set; VIP chapters stay locked.")
-            print("Tip: run `qidian qq --bid <id> --login` once to save a full session to")
+            print("Tip: run `bookqq --bid <id> --login` once to save a full session to")
             print(f"  {STORAGE_STATE}")
         else:
             print(f"Auth: {len(cookies)} cookie(s) injected for .qq.com")
@@ -169,7 +169,7 @@ def _probe(ext: DomExtractor, chapters: list[dict], bid: str):
 def login(bid: str = "46077914", cid: int = 442, timeout_s: int = 600) -> bool:
     """Open a headed browser; once the user logs in with an account that owns
     the book, and the given chapter's body becomes readable, save the full
-    session to STORAGE_STATE for reuse by `qidian qq`."""
+    session to STORAGE_STATE for reuse by `bookqq`."""
     load_env()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     url = f"https://book.qq.com/book-read/{bid}/{cid}"
@@ -233,4 +233,4 @@ def probe_api(bid: str):
     print("Capture tip      : pipe a proxied device through mqqapi.reader.qq.com and read a")
     print("                   VIP chapter on m.q.qq.com *on the phone-shaped UA*; the GET/POST")
     print("                   carrying the正文 is the content API. Put it in QQ_CATALOG_API /")
-    print("                   QQ_CONTENT_API and run `qidian qq --probe-api` again.")
+    print("                   QQ_CONTENT_API and run `bookqq --probe-api` again.")
