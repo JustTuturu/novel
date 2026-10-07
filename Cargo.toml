@@ -2,7 +2,7 @@
 name = "novel"
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.98"
 description = "Download Chinese web novels from Qidian and SFACG"
 default-run = "novel"
 
@@ -12,12 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 ego-tree = "0.11"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "json", "gzip", "charset"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "charset"] }
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
