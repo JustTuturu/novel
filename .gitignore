@@ -1,4 +1,7 @@
-# Python-generated files
+# Rust build artifacts
+/target/
+
+# Python-generated files (OCR sidecar only)
 __pycache__/
 *.py[oc]
 build/
@@ -6,6 +9,9 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache/
+
+# Sidecar log
+.ocr_sidecar.log
 
 # Virtual environments
 .venv
@@ -22,3 +28,4 @@ outputs/*_storage.json
 
 # Output files
 outputs/
+test.py
