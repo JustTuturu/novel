@@ -80,6 +80,36 @@ run is **0.9998**. Output is deterministic across runs.
 Detections are re-sorted into reading order before being joined, so the Qidian
 glyph-row decoding indexes a stable string.
 
+## Translate
+
+```bash
+novel translate outputs/sfacg_755866.txt
+novel translate outputs/sfacg_755866.txt --jobs 4 --rate 10
+```
+
+Reads the assembled book txt — or, when present, the per-chapter files from
+`outputs/<site>_<id>_chapters/` — and translates chapter by chapter through an
+OpenAI-compatible chat API (set `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+`OPENAI_MODEL` in `.env`). Each finished chapter lands immediately in
+`outputs/<site>_<id>_translated/NNNN.txt`, so a rerun resumes where it stopped,
+and the translated book txt is assembled at the end in catalog order with the
+same chapter framing as the extractor.
+
+The rate limit is a hard cap: a token-bucket limiter (default `--rate 10`
+requests/minute, no burst — calls are spaced 6 s apart) shared by all
+`--jobs` workers, with 429 + `Retry-After` handled by exponential backoff.
+
+Alongside each translation the model reports every proper noun it handled;
+entries are upserted into a self-updating SQLite glossary at
+`outputs/glossary.db` (first-writer-wins on the hanzi, so a name's translation
+pins on first sight), and the most relevant entries are prepended to each
+request. Inspect it with:
+
+```bash
+novel glossary list
+novel glossary export --format json --output glossary.json
+```
+
 ## Layout
 
 ```

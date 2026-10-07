@@ -8,6 +8,7 @@ mod browser;
 mod cleaner;
 mod cli;
 mod config;
+mod glossary;
 mod ocr;
 mod rule;
 mod text;

@@ -3,7 +3,7 @@
 //! Async: chromiumoxide is a tokio client, so every command runs in the
 //! runtime started by main.rs.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use crate::cleaner::TextCleaner;
 use crate::config;
 use crate::ocr;
 use crate::rule::{self, Chapter, ChapterResult, Track};
-use crate::translate::Translator;
+use crate::translate;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -70,8 +70,38 @@ enum Command {
         #[arg(long, default_value = "outputs")]
         output_dir: String,
     },
-    /// Translate extracted text (zh -> vi)
-    Translate { input: String, output: Option<String> },
+    /// Translate extracted text (zh -> vi), chapter by chapter
+    Translate {
+        input: String,
+        /// Final assembled translated book txt (default: <input stem>_vi.txt)
+        output: Option<String>,
+        /// Max concurrent API calls
+        #[arg(long, default_value_t = 2)]
+        jobs: usize,
+        /// Hard rate cap: API calls per minute (token bucket, no burst)
+        #[arg(long, default_value_t = 10)]
+        rate: u32,
+    },
+    /// Inspect the self-updating translation glossary (outputs/glossary.db)
+    Glossary {
+        #[command(subcommand)]
+        cmd: GlossaryCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GlossaryCmd {
+    /// List entries: id, hanzi, pinyin, importance, role
+    List,
+    /// Export the glossary
+    Export {
+        /// Output format: `markdown` or `json`
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Write to a file instead of stdout
+        #[arg(long)]
+        output: Option<String>,
+    },
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -100,10 +130,18 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Login { site, timeout, cdp } => login(&site, timeout, cdp.as_deref()).await,
         Command::Ocr { target, output_dir } => ocr_folder(&target, &output_dir).await,
-        Command::Translate { input, output } => {
-            let out = output.unwrap_or_else(|| default_vi_path(&input));
-            Translator::new().file(&input, &out).await
-        }
+        Command::Translate {
+            input,
+            output,
+            jobs,
+            rate,
+        } => translate::translate_book(&input, output.as_deref(), jobs, rate).await,
+        Command::Glossary { cmd } => match cmd {
+            GlossaryCmd::List => glossary_list().await,
+            GlossaryCmd::Export { format, output } => {
+                glossary_export(&format, output.as_deref()).await
+            }
+        },
     }
 }
 
@@ -187,10 +225,79 @@ fn chapter_label(ch: &Chapter) -> String {
     }
 }
 
-fn default_vi_path(input: &str) -> String {
-    match input.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}_vi.{ext}"),
-        None => format!("{input}_vi.txt"),
+// ---------------------------------------------------------------------------
+// Glossary inspection
+// ---------------------------------------------------------------------------
+
+async fn glossary_list() -> Result<()> {
+    let g = crate::glossary::Glossary::open(std::path::Path::new(crate::glossary::DB_PATH))?;
+    let entries = g.all()?;
+    println!(
+        "{:>4}  {:<12}  {:<16}  {:>3}  {}",
+        "id", "hanzi", "pinyin", "imp", "role (first seen)"
+    );
+    for e in entries {
+        println!(
+            "{:>4}  {:<12}  {:<16}  {:>3}  {} ({})",
+            e.id,
+            e.hanzi,
+            e.pinyin,
+            e.importance,
+            truncate_col(&e.role, 60),
+            e.first_seen
+        );
+    }
+    println!("\n{} entries", g.count()?);
+    Ok(())
+}
+
+async fn glossary_export(format: &str, output: Option<&str>) -> Result<()> {
+    let g = crate::glossary::Glossary::open(std::path::Path::new(crate::glossary::DB_PATH))?;
+    let entries = g.all()?;
+    let rendered = match format {
+        "json" => serde_json::to_string_pretty(
+            &entries
+                .iter()
+                .map(|e| serde_json::json!({
+                    "id": e.id,
+                    "hanzi": e.hanzi,
+                    "pinyin": e.pinyin,
+                    "role": e.role,
+                    "importance": e.importance,
+                    "first_seen": e.first_seen,
+                }))
+                .collect::<Vec<_>>(),
+        )?,
+        "markdown" | "md" => {
+            let mut s = String::from(
+                "| id | hanzi | pinyin | importance | role | first seen |\n\
+                 |---:|---|---|---:|---|---|\n",
+            );
+            for e in &entries {
+                s.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} |\n",
+                    e.id, e.hanzi, e.pinyin, e.importance, e.role, e.first_seen
+                ));
+            }
+            s
+        }
+        other => anyhow::bail!("unknown glossary export format {other:?} (use json | markdown)"),
+    };
+    match output {
+        Some(p) => {
+            std::fs::write(p, &rendered).with_context(|| format!("writing {p}"))?;
+            println!("Exported {} entries -> {p}", entries.len());
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+fn truncate_col(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
 
