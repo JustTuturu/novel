@@ -224,9 +224,9 @@ impl Sfacg {
             raw.len() / 1024
         );
 
-        // The sidecar boots lazily, so the client is cheap to build per call:
-        // `ensure_up` reuses an already-running sidecar.
-        let mut client = ocr::Client::new(None);
+        // The ONNX engine loads lazily on first use, so the client is cheap
+        // to build per call: the models stay loaded per process afterwards.
+        let mut client = ocr::Client::new();
         let ocr_text = client
             .image_text(&img_path, "\n")
             .await

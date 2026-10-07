@@ -54,9 +54,6 @@ enum Command {
         /// `--jobs 1` is the sequential read.
         #[arg(long, value_name = "N")]
         jobs: Option<usize>,
-        /// OCR engine for chapters that need it: `sidecar` (default, Python PaddleOCR service) or `native` (in-process Rust/ONNX, no Python needed)
-        #[arg(long, value_name = "sidecar|native")]
-        ocr_backend: Option<String>,
     },
     /// Log in and save the session for later runs
     Login {
@@ -67,14 +64,11 @@ enum Command {
         #[arg(long)]
         cdp: Option<String>,
     },
-    /// OCR a folder of screenshots (default backend: sidecar)
+    /// OCR images or a folder of them (in-process oar-ocr)
     Ocr {
         target: String,
         #[arg(long, default_value = "outputs")]
         output_dir: String,
-        /// OCR engine: `sidecar` (default, Python PaddleOCR service) or `native` (in-process Rust/ONNX, no Python needed)
-        #[arg(long, value_name = "sidecar|native")]
-        ocr_backend: Option<String>,
     },
     /// Translate extracted text (zh -> vi)
     Translate { input: String, output: Option<String> },
@@ -91,9 +85,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             headed,
             cdp,
             jobs,
-            ocr_backend,
         } => {
-            apply_ocr_backend(ocr_backend.as_deref())?;
             extract(
                 &url,
                 &output_dir,
@@ -107,26 +99,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Login { site, timeout, cdp } => login(&site, timeout, cdp.as_deref()).await,
-        Command::Ocr {
-            target,
-            output_dir,
-            ocr_backend,
-        } => ocr_folder(&target, &output_dir, ocr_backend.as_deref()).await,
+        Command::Ocr { target, output_dir } => ocr_folder(&target, &output_dir).await,
         Command::Translate { input, output } => {
             let out = output.unwrap_or_else(|| default_vi_path(&input));
             Translator::new().file(&input, &out).await
         }
     }
-}
-
-/// Validate `--ocr-backend` (or fail loudly) and publish it so the rule-level
-/// `ocr::Client::new(None)` calls pick it up from the environment.
-fn apply_ocr_backend(value: Option<&str>) -> Result<()> {
-    let backend = ocr::resolve_backend(value)?;
-    // SAFETY: single-threaded at this point (start of the command, before any
-    // worker task is spawned).
-    std::env::set_var("NOVEL_OCR_BACKEND", backend.as_str());
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -555,15 +533,10 @@ async fn login(site: &str, timeout_s: u64, cdp: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn ocr_folder(target: &str, output_dir: &str, backend: Option<&str>) -> Result<()> {
+async fn ocr_folder(target: &str, output_dir: &str) -> Result<()> {
     let path = PathBuf::from(target);
-    let backend = ocr::resolve_backend(backend)?;
-    if backend == ocr::Backend::Native {
-        println!("[ocr] backend: native (models: {})", ocr::native_model_dir().display());
-    } else {
-        println!("[ocr] backend: sidecar");
-    }
-    let mut client = ocr::Client::with_backend(None, backend);
+    println!("[ocr] models: {}", ocr::model_dir().display());
+    let mut client = ocr::Client::new();
     let results: Vec<(PathBuf, String)> = if path.is_dir() {
         client.process_folder(&path).await?
     } else {

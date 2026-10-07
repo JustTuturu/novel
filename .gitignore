@@ -1,27 +1,12 @@
 # Rust build artifacts
 /target/
 
-# Python-generated files (OCR sidecar only)
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-.ruff_cache/
-
-# Sidecar log
-.ocr_sidecar.log
-
-# Virtual environments
-.venv
-
 # User data
 user_data/
 
 # OCR Models
 models/
-# Native (oar-ocr) ONNX models
+# oar-ocr ONNX models
 outputs/oar_models/
 
 # Secrets

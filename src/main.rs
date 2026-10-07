@@ -1,8 +1,8 @@
 //! novel — download Chinese web novels from Qidian and SFACG.
 //!
 //! The Go implementation was the previous version; this Rust tree replaces it.
-//! Site rules are ported from 404-novel-project/novel-downloader. OCR still
-//! runs in Python behind a local HTTP sidecar (sidecar/ocr_service.py).
+//! Site rules are ported from 404-novel-project/novel-downloader. OCR runs
+//! in-process via oar-ocr (PP-OCRv6 ONNX models).
 
 mod browser;
 mod cleaner;

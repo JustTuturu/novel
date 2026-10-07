@@ -743,7 +743,7 @@ impl Qidian {
 
         let tmp = glyph_tmp_dir();
         std::fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        let mut client = ocr::Client::new(None);
+        let mut client = ocr::Client::new();
 
         let mut mapping: HashMap<char, char> = HashMap::new();
         let mut per_char_needed: Vec<char> = Vec::new();

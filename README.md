@@ -4,13 +4,12 @@ Download Chinese web novels from **起点 (qidian.com)** and **SF轻小说
 (sfacg.com)**, then clean and translate them. Site rules are ported from
 [404-novel-project/novel-downloader](https://github.com/404-novel-project/novel-downloader).
 
-A single Rust binary. Python survives only as an optional OCR engine.
+A single Rust binary. No Python involved.
 
 ## Install
 
 ```bash
-cargo build --release     # needs Rust 1.95+ (oar-ocr's floor)
-uv sync                   # only needed for the default OCR backend
+cargo build --release     # needs Rust 1.98+ (rust-version floor)
 ```
 
 You'll also want a Chromium-family browser. Brave at
@@ -28,12 +27,13 @@ novel extract <url> --start 50     # from chapter 50
 novel extract <url> --only-vip     # VIP chapters only
 novel extract <url> --headed       # show the browser
 novel extract <url> --cdp http://localhost:9222   # use your own browser
+novel extract <url> --jobs 6       # parallel chapter workers
 
 novel login qidian                  # capture a session, then VIP chapters unlock
 novel login sfacg
 
-novel ocr screenshots              # OCR images or a folder of them
-novel translate outputs/qidian_诡秘之主.txt   # zh -> vi
+novel ocr screenshots               # OCR images or a folder of them
+novel translate outputs/sfacg_755866.txt   # zh -> vi, chapter by chapter
 ```
 
 Chapters you don't own come back `LOCKED` and are skipped; nothing bypasses a
@@ -63,44 +63,38 @@ or run `novel login <site>`, which saves to `outputs/<site>_storage.json`.
 
 ## OCR
 
-Pick with `--ocr-backend <sidecar|native>` or `NOVEL_OCR_BACKEND`.
-
-**`sidecar`** (default) runs PaddleOCR out-of-process as a small Python HTTP
-service the CLI auto-starts on first use. Highest accuracy, needs the venv.
-
-**`native`** runs PP-OCRv6 ONNX models inside the process via
-[oar-ocr](https://crates.io/crates/oar-ocr) — no Python, no service, ~9× faster
-on this machine. Models aren't bundled and are never fetched at runtime:
+One engine: [oar-ocr](https://crates.io/crates/oar-ocr) running PP-OCRv6 ONNX
+models inside the process — no Python, no service, no model downloads at
+runtime. Models aren't bundled; fetch them once:
 
 ```bash
-./scripts/fetch_ocr_models.sh          # medium tier, ~138 MB, verifies SHA-256
-./scripts/fetch_ocr_models.sh small    # ~31 MB if you'd rather not
+./scripts/fetch_ocr_models.sh     # PP-OCRv6 medium tier, ~138 MB, verifies SHA-256
 ```
 
-Measured on one 1920x5511 chapter page, character similarity against the
-sidecar: **0.9998** on the medium tier (one stray glyph from the page's vote
-counter across 91 lines) and 0.9967 on small. Native output is deterministic
-across runs.
+Measurements on a 1920x5511 chapter page: the pinned detection config
+(`limit_side_len = 64 / min`, the values paddlex resolves for PP-OCRv6 det
+models) finds all ~131 lines, where the library default would silently lose
+whole paragraphs; character similarity against a PaddleOCR medium reference
+run is **0.9998**. Output is deterministic across runs.
 
-Either way, detections are re-sorted into reading order before being joined, so
-the Qidian glyph-row decoding works the same on both.
+Detections are re-sorted into reading order before being joined, so the Qidian
+glyph-row decoding indexes a stable string.
 
 ## Layout
 
 ```
 src/
-  cli.rs       # the four subcommands
+  cli.rs       # the subcommands
   rule.rs      # Rule trait, Book/Chapter, registry
   browser.rs   # CDP session: launch, attach, navigate, fetch, cookies
   qidian.rs    # Qidian rule + font glyph decoding
   sfacg.rs     # SFACG rule + VIP image OCR
   text.rs      # cleaning, PUA detection, attribute deobfuscation
   cleaner.rs   # OCR-artifact cleanup
-  translate.rs # zh -> vi
-  ocr.rs       # both OCR backends
+  translate.rs # zh -> vi, chapter by chapter, self-updating glossary
+  glossary.rs  # SQLite glossary (RAG retrieval + write-default upserts)
+  ocr.rs       # in-process oar-ocr OCR client
   config.rs    # .env, cookies, paths
-sidecar/       # the Python OCR service
-src/novel/     # PaddleOCR wrapper — the only Python involved
 ```
 
 ## Notes
