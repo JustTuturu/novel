@@ -4,69 +4,54 @@ Download Chinese web novels from **起点 (qidian.com)** and **SF轻小说
 (sfacg.com)**, then clean and translate them. Site rules are ported from
 [404-novel-project/novel-downloader](https://github.com/404-novel-project/novel-downloader).
 
-The CLI is **Rust**. Python survives only as the OCR engine behind a tiny local
-HTTP sidecar.
-
-## Requirements
-
-- Rust (stable; built and tested with 1.98)
-- A Chromium-family browser — Brave is auto-detected at
-  `/opt/brave.com/brave-origin/brave`, override with `NOVEL_BROWSER=/path/to/browser`.
-  Otherwise the first of `chromium`, `chromium-browser`, `google-chrome`,
-  `google-chrome-stable`, `brave-browser` on `PATH` is used.
-- Python 3.12 with `uv` — only for OCR (PaddleOCR).
+A single Rust binary. Python survives only as an optional OCR engine.
 
 ## Install
 
 ```bash
-cargo build --release          # ./target/release/novel
-uv sync                        # OCR sidecar only
+cargo build --release     # needs Rust 1.95+ (oar-ocr's floor)
+uv sync                   # only needed for the default OCR backend
 ```
 
-## Usage
+You'll also want a Chromium-family browser. Brave at
+`/opt/brave.com/brave-origin/brave` is used automatically; otherwise set
+`NOVEL_BROWSER`, or let it find `chromium` / `google-chrome` on `PATH`.
+
+## Use
 
 ```bash
-# Extract a whole book (free chapters unless logged in)
 novel extract https://www.qidian.com/book/1010868264/
 novel extract https://book.sfacg.com/Novel/755866/
 
-# Filters
-novel extract <url> --start 50        # from chapter 50 on
-novel extract <url> --only-vip        # VIP chapters only
-novel extract <url> --limit 10        # first 10 chapters
+novel extract <url> --limit 10     # first ten chapters
+novel extract <url> --start 50     # from chapter 50
+novel extract <url> --only-vip     # VIP chapters only
+novel extract <url> --headed       # show the browser
+novel extract <url> --cdp http://localhost:9222   # use your own browser
 
-# Log in once (headed), then VIP chapters unlock
-novel login qidian
+novel login qidian                  # capture a session, then VIP chapters unlock
 novel login sfacg
 
-# OCR a folder of screenshots (default backend: Python sidecar)
-novel ocr path/to/screenshots
-novel ocr path/to/screenshots --ocr-backend native   # in-process Rust OCR
-
-# Translate extracted text (zh -> vi)
-novel translate outputs/qidian_诡秘之主.txt
+novel ocr screenshots              # OCR images or a folder of them
+novel translate outputs/qidian_诡秘之主.txt   # zh -> vi
 ```
 
-Useful flags: `--output-dir` (default `outputs`), `--ocr-backend <sidecar|native>`
-(default `sidecar`; see [OCR backends](#ocr-backends)), `--headed`, `--cdp http://localhost:9222`
-to attach to your own already-running browser instead of launching one. Prefer
-`--cdp` for VIP work: both sites fingerprint browsers, and your daily profile is
-the least suspicious one you have.
+Chapters you don't own come back `LOCKED` and are skipped; nothing bypasses a
+paywall. Prefer `--cdp` for VIP work — both sites fingerprint browsers, and your
+daily profile is the least suspicious one you have.
 
-## VIP handling
+## How the two hard cases work
 
-**Qidian** — VIP pages ship text in a custom encrypted font. The CLI renders
-each unknown glyph to a canvas inside the real browser, OCRs the rendered image
-through the sidecar, and builds a glyph→character map (cached in
-`outputs/qidian_fontmap.json`, keyed by font), then rewrites the text. Chapters
-that stay undecodable fall back to a screenshot and are reported `NEEDS OCR`.
+**Qidian VIP** renders text in a custom encrypted font. The CLI draws each
+unknown glyph on a canvas inside the real browser, OCRs the drawing, builds a
+glyph→character map (cached in `outputs/qidian_fontmap.json`) and rewrites the
+text. Whatever stays undecodable becomes a screenshot marked `NEEDS OCR`.
 
-**SFACG** — VIP chapters are a single image (`#vipImage`). It's fetched with the
-chapter URL as `Referer`, retried while the response is a known failure size
-(53658 / 42356 bytes), OCRed into text, and the image is kept under
-`outputs/sfacg_<id>_images/`.
+**SFACG VIP** is a single image (`#vipImage`). It's fetched with the chapter URL
+as `Referer`, retried while the response is a known failure size, then OCRed;
+the image is kept under `outputs/sfacg_<id>_images/`.
 
-Both sites need a logged-in session for chapters you own:
+Both need a logged-in session:
 
 ```env
 # .env (gitignored)
@@ -74,95 +59,55 @@ QIDIAN_COOKIE="_csrfToken=...;..."
 SFACG_COOKIE="..."
 ```
 
-or run `novel login <site>` to capture a browser session into
-`outputs/<site>_storage.json`.
+or run `novel login <site>`, which saves to `outputs/<site>_storage.json`.
 
-## OCR backends
+## OCR
 
-There are two interchangeable OCR backends. **`sidecar` is the default**; the
-native one is opt-in.
+Pick with `--ocr-backend <sidecar|native>` or `NOVEL_OCR_BACKEND`.
 
-### `sidecar` (default) — Python PaddleOCR service
+**`sidecar`** (default) runs PaddleOCR out-of-process as a small Python HTTP
+service the CLI auto-starts on first use. Highest accuracy, needs the venv.
 
-PaddleOCR has no Rust runtime, so it runs out-of-process as a stdlib Python HTTP
-service:
-
-- `GET /health` → `{"ok": true}`
-- `POST /ocr {"path": "…", "join": "\n"}` → `{"text": "…"}`
-
-The CLI **auto-spawns it** on first use (`.venv/bin/python sidecar/ocr_service.py`,
-log in `.ocr_sidecar.log`). To run it yourself:
+**`native`** runs PP-OCRv6 ONNX models inside the process via
+[oar-ocr](https://crates.io/crates/oar-ocr) — no Python, no service, ~9× faster
+on this machine. Models aren't bundled and are never fetched at runtime:
 
 ```bash
-.venv/bin/python sidecar/ocr_service.py --port 8765
-NOVEL_OCR_URL=http://127.0.0.1:8765   # if it's elsewhere
+./scripts/fetch_ocr_models.sh          # medium tier, ~138 MB, verifies SHA-256
+./scripts/fetch_ocr_models.sh small    # ~31 MB if you'd rather not
 ```
 
-### `native` — in-process Rust OCR
+Measured on one 1920x5511 chapter page, character similarity against the
+sidecar: **0.9998** on the medium tier (one stray glyph from the page's vote
+counter across 91 lines) and 0.9967 on small. Native output is deterministic
+across runs.
 
-`rapidocr-core` runs the PP-OCRv6 ONNX models through ONNX Runtime inside the
-`novel` process: no Python, no sidecar, no HTTP.
+Either way, detections are re-sorted into reading order before being joined, so
+the Qidian glyph-row decoding works the same on both.
 
-```bash
-novel ocr screenshots --ocr-backend native
-```
-
-Models are **not** bundled. The first run downloads them (~30MB, needs network);
-every later run loads them from the cache:
-
-```bash
-RAPIDOCR_MODEL_DIR=outputs/rapidocr_models   # default
-RAPIDOCR_MODEL_SET=ppocrv6-small             # default; also: ppocrv6-tiny, ppocrv6-medium, ppocrv5-*
-```
-
-If the download fails (offline), the error says so and suggests falling back to
-`--ocr-backend sidecar`. `outputs/` is gitignored, so the model cache is never
-committed.
-
-### Choosing a backend
-
-Precedence: CLI flag → `NOVEL_OCR_BACKEND` env var → `sidecar`.
-
-```bash
-novel ocr screenshots --ocr-backend native
-NOVEL_OCR_BACKEND=native novel extract <url>
-```
-
-An unknown value (`NOVEL_OCR_BACKEND=paddle`) is a hard error, never a silent
-fallback. Both backends honour the same contract: detections in reading order
-(top-to-bottom, then left-to-right), joined by the requested separator —
-`join=""` keeps a glyph row's characters adjacent, which is what the Qidian
-glyph-map decoder relies on.
-
-## Structure
+## Layout
 
 ```
 src/
-  main.rs        # entry point, registers the rules
-  cli.rs         # extract / login / ocr / translate
-  rule.rs        # Rule trait, Book/Chapter/ChapterResult, registry
-  browser.rs     # CDP browser session (launch, attach, navigate, fetch, cookies)
-  qidian.rs      # Qidian rule + encrypted-font glyph-map decoding
-  sfacg.rs       # SFACG rule + VIP image OCR
-  text.rs        # text cleaning, PUA detection, attribute deobfuscation
-  cleaner.rs     # OCR-artifact cleanup (shared with the Python flow)
-  translate.rs   # zh -> vi translation
-  ocr.rs         # OCR client: sidecar + native rapidocr-core backends
-  config.rs      # .env, cookies, output paths
-sidecar/
-  ocr_service.py # stdlib HTTP OCR service
-src/novel/
-  ocr.py         # PaddleOCR wrapper (the only Python the CLI needs)
-outputs/         # extracted .txt files, glyph maps, OCR images, sessions
+  cli.rs       # the four subcommands
+  rule.rs      # Rule trait, Book/Chapter, registry
+  browser.rs   # CDP session: launch, attach, navigate, fetch, cookies
+  qidian.rs    # Qidian rule + font glyph decoding
+  sfacg.rs     # SFACG rule + VIP image OCR
+  text.rs      # cleaning, PUA detection, attribute deobfuscation
+  cleaner.rs   # OCR-artifact cleanup
+  translate.rs # zh -> vi
+  ocr.rs       # both OCR backends
+  config.rs    # .env, cookies, paths
+sidecar/       # the Python OCR service
+src/novel/     # PaddleOCR wrapper — the only Python involved
 ```
 
 ## Notes
 
-- Chapters you don't own are reported `LOCKED` and skipped; nothing bypasses
-  purchase walls.
-- The browser layer speaks raw CDP over a websocket (no Playwright/Puppeteer), so
-  there is no automation fingerprint from a driver library — only what Chrome
-  itself exposes.
-- Qidian's VIP font path is the only part not exercised end-to-end without a
-  logged-in account; the glyph rendering, OCR round-trip and cache were verified
-  separately against a live page.
+- The browser layer speaks raw CDP over a websocket rather than Playwright or
+  Puppeteer, so there's no driver-level automation fingerprint — only what
+  Chrome itself exposes.
+- Qidian's VIP font path has been verified in pieces (glyph rendering, OCR
+  round-trip, cache) but not end-to-end, which needs an account that owns a VIP
+  chapter.

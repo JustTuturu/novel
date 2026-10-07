@@ -21,8 +21,8 @@ user_data/
 
 # OCR Models
 models/
-# Native (rapidocr-core) ONNX model cache
-outputs/rapidocr_models/
+# Native (oar-ocr) ONNX models
+outputs/oar_models/
 
 # Secrets
 .env
