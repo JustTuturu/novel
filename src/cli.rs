@@ -6,12 +6,14 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::browser::{self, Session};
 use crate::cleaner::TextCleaner;
 use crate::config;
 use crate::ocr;
-use crate::rule::{self, Chapter, ChapterResult};
+use crate::rule::{self, Chapter, ChapterResult, Track};
 use crate::translate::Translator;
 
 #[derive(Parser, Debug)]
@@ -109,6 +111,84 @@ fn apply_ocr_backend(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Shared-client pacing (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Jittered pacing for the shared reqwest client: HTTP chapter fetches are
+/// spaced out by a randomised interval so parallel workers never settle into a
+/// fixed request cadence (anti-rate-limit). Clock is a monotonic deadline
+/// queue over atomics, so tasks can share one pacing queue without a mutex.
+pub struct Pacer {
+    /// Monotonic deadline (ms since process start) reserved by the last caller.
+    next_deadline_ms: AtomicU64,
+    base_ms: u64,
+    jitter_ms: u64,
+    seed: AtomicU64,
+}
+
+impl Pacer {
+    /// [base, base + jitter) ms between the starts of two HTTP fetches.
+    const fn new(base_ms: u64, jitter_ms: u64) -> Self {
+        Self {
+            next_deadline_ms: AtomicU64::new(0),
+            base_ms,
+            jitter_ms,
+            seed: AtomicU64::new(0),
+        }
+    }
+
+    fn start_ms() -> u64 {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_millis() as u64
+    }
+
+    /// xorshift64* — tiny, dependency-free, good enough for pacing jitter.
+    fn next_rand(&self) -> u64 {
+        let mut x = match self.seed.load(Ordering::Relaxed) {
+            0 => 0x9E3779B97F4A7C15,
+            s => s,
+        };
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.seed.store(x, Ordering::Relaxed);
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    fn span_ms(&self) -> u64 {
+        self.base_ms + (self.next_rand() % self.jitter_ms.max(1))
+    }
+
+    /// Reserve the next slot and wait out the (always-positive) remainder.
+    async fn pause(&self) {
+        let span = self.span_ms();
+        let slot = self
+            .next_deadline_ms
+            .fetch_add(span, Ordering::Relaxed)
+            .max(Self::start_ms());
+        let now = Self::start_ms();
+        if slot > now {
+            tokio::time::sleep(Duration::from_millis(slot - now)).await;
+        }
+    }
+}
+
+/// HTTP pacing constants keeping us clear of the sites' rate limits.
+const HTTP_PACING_BASE_MS: u64 = 150;
+const HTTP_PACING_JITTER_MS: u64 = 350;
+
+/// `section / title`, or just the title when there is no section.
+fn chapter_label(ch: &Chapter) -> String {
+    match ch.section_name.is_empty() {
+        true => ch.title.clone(),
+        false => format!("{} / {}", ch.section_name, ch.title),
+    }
+}
+
 fn default_vi_path(input: &str) -> String {
     match input.rsplit_once('.') {
         Some((stem, ext)) => format!("{stem}_vi.{ext}"),
@@ -157,11 +237,20 @@ async fn extract(
     }
 
     let mut combined: Vec<String> = Vec::new();
+    // Phase 2: jittered pacing for everything that goes over the shared HTTP
+    // client (Qidian free chapters use it too — the browser is fallback-only).
+    let http_pacer = Pacer::new(HTTP_PACING_BASE_MS, HTTP_PACING_JITTER_MS);
     for ch in &selected {
-        let label = match ch.section_name.is_empty() {
-            true => ch.title.clone(),
-            false => format!("{} / {}", ch.section_name, ch.title),
-        };
+        // Catalog-known-locked chapters are never scheduled at all: no request
+        // and certainly no hammering of the purchase wall.
+        if ch.is_paid == Some(false) {
+            println!("  [{}] {}... LOCKED (catalog)", ch.num, chapter_label(ch));
+            continue;
+        }
+        if r.chapter_track(ch) == Track::Http {
+            http_pacer.pause().await;
+        }
+        let label = chapter_label(ch);
         print!("  [{}] {}...", ch.num, label);
         use std::io::Write;
         std::io::stdout().flush().ok();

@@ -46,6 +46,16 @@ pub struct ChapterResult {
     pub images: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Track {
+    /// Server-rendered HTML: plain HTTP through the shared client (fast,
+    /// jittered pacing; no browser target needed).
+    Http,
+    /// Needs a rendered DOM/JS canvas (Qidian VIP iframe text, glyph
+    /// rendering): one browser page target.
+    Browser,
+}
+
 pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
     fn domains(&self) -> &'static [&'static str];
@@ -53,6 +63,15 @@ pub trait Rule: Send + Sync {
         1
     }
     fn storage_state_path(&self) -> String;
+    /// How [`crate::cli::extract`] should fetch this chapter (Phase 2,
+    /// HTTP-first): server-rendered pages go through the shared reqwest
+    /// client, and the browser is reserved for DOM/JS-required renders.
+    /// Catalog-covered pre-checks (e.g. Qidian `is_paid == Some(false)`
+    /// lockouts) are filtered out by the caller before this is consulted.
+    fn chapter_track(&self, ch: &Chapter) -> Track {
+        let _ = ch;
+        Track::Browser
+    }
     fn book_parse<'a>(
         &'a self,
         url: &'a str,

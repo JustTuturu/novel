@@ -258,6 +258,11 @@ impl rule::Rule for Sfacg {
     fn domains(&self) -> &'static [&'static str] {
         &["sfacg.com", "sfacg.cn"]
     }
+    // All SFACG outcomes are plain-HTTP already: free chapters come from the
+    // server-rendered article, VIP chapters from an HTTP image fetch.
+    fn chapter_track(&self, _ch: &Chapter) -> rule::Track {
+        rule::Track::Http
+    }
     fn concurrency_limit(&self) -> usize {
         1
     }

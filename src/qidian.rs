@@ -189,6 +189,17 @@ const INTRO_CANDIDATES: &[MetaCandidate] = &[
     },
 ];
 
+/// Plain-HTTP attempt result ([`Qidian::http_chapter`]).
+enum HttpOutcome {
+    /// Server-rendered HTML served the chapter; result ready.
+    Served(ChapterResult),
+    /// Paywall markers present in the served HTML.
+    Locked,
+    /// Could not serve it (anti-bot challenge page, empty render) — let the
+    /// browser render it instead.
+    Fallback,
+}
+
 pub struct Qidian;
 
 impl Qidian {
@@ -400,6 +411,172 @@ impl Qidian {
 
     // -- chapters --------------------------------------------------------
 
+    /// Plain-HTTP attempt for server-rendered free chapters. Carries the live
+    /// browser cookie jar, so a logged-in/entitled session benefits too; it
+    /// only wins completely when the served PUA glyphs are all in the font
+    /// cache (a cache miss still needs a browser canvas to render).
+    async fn http_chapter(ch: &Chapter, s: &Session) -> Result<HttpOutcome> {
+        let html = match s.fetch(&ch.url, None, &[]).await {
+            Ok(t) => t,
+            Err(_) => return Ok(HttpOutcome::Fallback),
+        };
+        // scraper::Html is not `Send`; parse + reduce inside one block that
+        // closes before the next await (same pattern as the sfacg rule).
+        let outcome = {
+            let doc = Html::parse_document(&html);
+            let body = doc_body_text(&doc, " ");
+            if LOCK_MARKERS.iter().any(|m| body.contains(m)) {
+                return Ok(HttpOutcome::Locked);
+            }
+            let mut txt = String::new();
+            for sel in CONTENT_SELECTORS {
+                let Ok(parsed) = Selector::parse(sel) else {
+                    continue;
+                };
+                let raw = text::text_of(&doc, &parsed, " ").trim().to_string();
+                if !raw.is_empty() {
+                    txt = raw;
+                    break;
+                }
+            }
+            if txt.is_empty() {
+                HttpOutcome::Fallback
+            } else {
+                let mut title = ch.title.clone();
+                title = ["h1.j_chapterName", ".chapter-name", "h1"]
+                    .iter()
+                    .find_map(|css| {
+                        Selector::parse(css)
+                            .ok()
+                            .map(|sel| text::text_of(&doc, &sel, " "))
+                            .filter(|t| !t.trim().is_empty())
+                            .map(|t| t.trim().lines().next().unwrap_or("").to_string())
+                    })
+                    .unwrap_or(title);
+                if text::pua_ratio(&txt) <= 0.05 {
+                    HttpOutcome::Served(ChapterResult {
+                        title,
+                        text: text::clean_text(&txt, &[]),
+                        ..Default::default()
+                    })
+                } else if let Some(decoded) = Self::decode_pua_cached(&txt) {
+                    HttpOutcome::Served(ChapterResult {
+                        title,
+                        text: text::clean_text(&decoded, &[]),
+                        ..Default::default()
+                    })
+                } else {
+                    // Encrypted font with glyphs the cache does not cover:
+                    // the canvas render needs a browser.
+                    HttpOutcome::Fallback
+                }
+            }
+        };
+        Ok(outcome)
+    }
+
+    /// Best-effort PUA decode using ONLY the on-disk font cache (no page).
+    /// Tries every cached font (Qidian names its encrypted fonts per book) and
+    /// keeps the mapping that resolves the most glyphs. `None` when anything
+    /// meaningful stays unresolved.
+    fn decode_pua_cached(txt: &str) -> Option<String> {
+        let pua_chars = text::pua_chars(txt);
+        if pua_chars.is_empty() {
+            return Some(txt.to_string());
+        }
+        let mut best: HashMap<char, char> = HashMap::new();
+        let mut best_hits = 0usize;
+        for (_, map) in load_fontmap() {
+            let mut resolved: HashMap<char, char> = HashMap::new();
+            for c in &pua_chars {
+                if let Some(v) = map.get(c) {
+                    resolved.insert(*c, *v);
+                }
+            }
+            if resolved.len() > best_hits {
+                best_hits = resolved.len();
+                best = resolved;
+            }
+        }
+        if best_hits < pua_chars.len() {
+            return None;
+        }
+        Some(text::replace_map(txt, &best))
+    }
+
+    /// The browser-rendered path (unchanged behaviour: this is what ran before
+    /// Phase 2, still needed for VIP iframe text and Plex/anti-bot pages).
+    async fn browser_chapter(ch: &Chapter, s: &Session) -> Result<ChapterResult> {
+        s.goto(&ch.url)
+            .await
+            .with_context(|| format!("qidian: goto {}", ch.url))?;
+
+        let body = s.text_of("body").await.unwrap_or_default();
+        if Self::is_locked(&body, s).await {
+            return Ok(ChapterResult {
+                title: ch.title.clone(),
+                locked: true,
+                ..Default::default()
+            });
+        }
+
+        let mut txt = String::new();
+        let mut selector = "";
+        for sel in CONTENT_SELECTORS {
+            let Ok(raw) = s.text_of(sel).await else {
+                continue;
+            };
+            let raw = raw.trim().to_string();
+            if !raw.is_empty() {
+                txt = raw;
+                selector = sel;
+                break;
+            }
+        }
+
+        let mut title = ch.title.clone();
+        if let Ok(raw) = s.text_of("h1.j_chapterName, .chapter-name, h1").await {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                title = raw.lines().next().unwrap_or("").to_string();
+            }
+        }
+
+        if txt.is_empty() {
+            return Ok(ChapterResult {
+                title,
+                needs_ocr: true,
+                ..Default::default()
+            });
+        }
+
+        if text::pua_ratio(&txt) <= 0.05 {
+            return Ok(ChapterResult {
+                title,
+                text: text::clean_text(&txt, &[]),
+                ..Default::default()
+            });
+        }
+
+        // Encrypted font: decode PUA glyphs via the cached font map, then
+        // rebuild the text.
+        let decoded = Self::decode_pua(s, &txt, selector).await?;
+        if text::pua_ratio(&decoded) > 0.05 {
+            // best-effort: the CLI OCRs these screenshots later
+            let _ = Self::screenshot(ch, s).await;
+            return Ok(ChapterResult {
+                title,
+                needs_ocr: true,
+                ..Default::default()
+            });
+        }
+        Ok(ChapterResult {
+            title,
+            text: text::clean_text(&decoded, &[]),
+            ..Default::default()
+        })
+    }
+
     /// The paywall: a lock marker in the body text, or the VIP limit overlay
     /// being present.
     async fn is_locked(body: &str, s: &Session) -> bool {
@@ -447,7 +624,15 @@ impl Qidian {
                 missing.len(),
                 missing.len() / PER_ROW + 1
             );
-            for (k, v) in Self::build_glyph_map(s, &missing, selector).await? {
+            // Single-threaded on purpose: `build_glyph_map` renders on the page
+            // it is handed AND reads/writes the shared cache
+            // (`outputs/qidian_fontmap.json`) — concurrent workers must not
+            // interleave either side.
+            let built = {
+                let _gate = glyph_gate().lock().await;
+                Self::build_glyph_map(s, &missing, selector).await
+            };
+            for (k, v) in built? {
                 mapping.insert(k, v);
             }
         }
@@ -550,6 +735,17 @@ impl rule::Rule for Qidian {
     fn domains(&self) -> &'static [&'static str] {
         &["qidian.com"]
     }
+    fn chapter_track(&self, ch: &Chapter) -> rule::Track {
+        // Catalog-known-locked chapters never reach scheduling (the CLI skips
+        // `is_paid == Some(false)`). Free chapters are server-rendered; VIP
+        // entitlement is unknowable from the catalog, so those read as iframe
+        // text through a browser page.
+        if ch.is_vip {
+            rule::Track::Browser
+        } else {
+            rule::Track::Http
+        }
+    }
     fn storage_state_path(&self) -> String {
         "outputs/qidian_storage.json".to_string()
     }
@@ -579,74 +775,31 @@ impl rule::Rule for Qidian {
         s: &'a Session,
     ) -> BoxFuture<'a, Result<ChapterResult>> {
         Box::pin(async move {
-            s.goto(&ch.url)
-                .await
-                .with_context(|| format!("qidian: goto {}", ch.url))?;
-
-            let body = s.text_of("body").await.unwrap_or_default();
-            if Self::is_locked(&body, s).await {
-                return Ok(ChapterResult {
-                    title: ch.title.clone(),
-                    locked: true,
-                    ..Default::default()
-                });
-            }
-
-            let mut txt = String::new();
-            let mut selector = "";
-            for sel in CONTENT_SELECTORS {
-                let Ok(raw) = s.text_of(sel).await else {
-                    continue;
-                };
-                let raw = raw.trim().to_string();
-                if !raw.is_empty() {
-                    txt = raw;
-                    selector = sel;
-                    break;
+            // Phase 2: free chapters are server-rendered, so try plain HTTP
+            // first (with the live browser cookie jar). Challenges, lock
+            // markers and uncached encrypted fonts fall back below.
+            if ch.is_paid != Some(false) {
+                match Self::http_chapter(ch, s).await? {
+                    HttpOutcome::Served(res) => return Ok(res),
+                    HttpOutcome::Locked => {
+                        return Ok(ChapterResult {
+                            title: ch.title.clone(),
+                            locked: true,
+                            ..Default::default()
+                        })
+                    }
+                    HttpOutcome::Fallback => {}
                 }
             }
 
-            let mut title = ch.title.clone();
-            if let Ok(raw) = s.text_of("h1.j_chapterName, .chapter-name, h1").await {
-                let raw = raw.trim();
-                if !raw.is_empty() {
-                    title = raw.lines().next().unwrap_or("").to_string();
-                }
-            }
-
-            if txt.is_empty() {
-                return Ok(ChapterResult {
-                    title,
-                    needs_ocr: true,
-                    ..Default::default()
-                });
-            }
-
-            if text::pua_ratio(&txt) <= 0.05 {
-                return Ok(ChapterResult {
-                    title,
-                    text: text::clean_text(&txt, &[]),
-                    ..Default::default()
-                });
-            }
-
-            // Encrypted font: decode PUA glyphs via the cached font map, then
-            // rebuild the text.
-            let decoded = Self::decode_pua(s, &txt, selector).await?;
-            if text::pua_ratio(&decoded) > 0.05 {
-                // best-effort: the CLI OCRs these screenshots later
-                let _ = Self::screenshot(ch, s).await;
-                return Ok(ChapterResult {
-                    title,
-                    needs_ocr: true,
-                    ..Default::default()
-                });
-            }
-            Ok(ChapterResult {
-                title,
-                text: text::clean_text(&decoded, &[]),
-                ..Default::default()
-            })
+            // Browser render. Without --jobs this is the old sequential read;
+            // with the worker pool only one HTTP-track fallback may use the
+            // main page at a time (pool pages are never free here), so hold a
+            // process-wide gate across the whole render.
+            let gate = main_page_gate().lock().await;
+            let res = Self::browser_chapter(ch, s).await;
+            drop(gate);
+            res
         })
     }
 }
@@ -662,6 +815,21 @@ pub fn register() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Process-wide lock across the whole browser render of one chapter. HTTP-
+/// track fallbacks use the session's main page, which is not a pooled page, so
+/// only one may render at a time (`build_glyph_map` is additionally gated by
+/// [`glyph_gate`]).
+fn main_page_gate() -> &'static tokio::sync::Mutex<()> {
+    static G: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    G.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Single-threaded glyph-map build (shared cache + shared render page).
+fn glyph_gate() -> &'static tokio::sync::Mutex<()> {
+    static G: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    G.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// goquery's `get_text(sep)` for one element: descendant text nodes, trimmed,
 /// empty ones dropped, joined with `sep` (BeautifulSoup's `get_text(" ", …)`).
 fn el_text(el: ElementRef, sep: &str) -> String {
@@ -670,6 +838,30 @@ fn el_text(el: ElementRef, sep: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(sep)
+}
+
+/// Whole-document text pool, like the sfacg rule's `doc_text` (`sep`-joined
+/// trimmed text nodes) — used by the plain-HTTP lock-marker check.
+fn doc_body_text(doc: &Html, sep: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    collect_body_text(doc.tree.root(), &mut parts);
+    parts
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+fn collect_body_text(node: ego_tree::NodeRef<'_, scraper::Node>, out: &mut Vec<String>) {
+    match node.value() {
+        scraper::Node::Text(t) => out.push(t.text.to_string()),
+        _ => {
+            for child in node.children() {
+                collect_body_text(child, out);
+            }
+        }
+    }
 }
 
 /// The glyph cache; a missing or corrupt file yields an empty map.
