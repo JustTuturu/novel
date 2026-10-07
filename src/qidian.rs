@@ -36,6 +36,15 @@ const CONTENT_SELECTORS: &[&str] = &[
     ".text-wrap .read-content",
 ];
 
+/// Block-level element names for the [`Qidian::qd_inner_text`] innerText
+/// emulation (`innerText` breaks the line before AND after a block element,
+/// which is why consecutive paragraphs come out "\n\n"-separated).
+const BLOCK_ELEMENTS: &[&str] = &[
+    "p", "div", "main", "section", "article", "h1", "h2", "h3", "h4", "h5",
+    "h6", "li", "tr", "blockquote", "pre", "ul", "ol", "table", "header",
+    "footer", "nav", "aside", "figure", "figcaption", "dd", "dt",
+];
+
 /// Paywall strings in the page body; any hit means the chapter is not readable.
 const LOCK_MARKERS: &[&str] = &[
     "这是VIP章节",
@@ -433,7 +442,13 @@ impl Qidian {
                 let Ok(parsed) = Selector::parse(sel) else {
                     continue;
                 };
-                let raw = text::text_of(&doc, &parsed, " ").trim().to_string();
+                let Some(el) = doc.select(&parsed).next() else {
+                    continue;
+                };
+                // innerText-equivalent extraction: the pre-Phase-2 browser
+                // route read this container's `innerText` with real paragraph
+                // breaks, so the plain-HTTP path must reproduce those bytes.
+                let raw = Self::qd_inner_text(el).trim().to_string();
                 if !raw.is_empty() {
                     txt = raw;
                     break;
@@ -448,9 +463,8 @@ impl Qidian {
                     .find_map(|css| {
                         Selector::parse(css)
                             .ok()
-                            .map(|sel| text::text_of(&doc, &sel, " "))
-                            .filter(|t| !t.trim().is_empty())
-                            .map(|t| t.trim().lines().next().unwrap_or("").to_string())
+                            .map(|sel| Self::el_line_title(&doc, &sel))
+                            .filter(|t| !t.is_empty())
                     })
                     .unwrap_or(title);
                 if text::pua_ratio(&txt) <= 0.05 {
@@ -475,6 +489,60 @@ impl Qidian {
         Ok(outcome)
     }
 
+    /// First line of an element's innerText (`innerText` can render several
+    /// lines for the chapter heading on qidian's redesigned pages).
+        fn el_line_title(doc: &Html, sel: &Selector) -> String {
+        doc.select(sel)
+            .next()
+            .map(|el| Self::qd_inner_text(el).trim().to_string())
+            .map(|t| t.lines().next().unwrap_or("").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Browser `innerText` emulation for a container subtree: text nodes are
+    /// concatenated verbatim, script/style subtrees contribute nothing, and
+    /// block-level children get a newline before and after, so successive
+    /// paragraphs are separated by "\n\n" — exactly what `innerText` used to
+    /// hand the CLI when the chapter was rendered in the browser.
+    fn qd_inner_text(root: ElementRef) -> String {
+        fn walk(node: ego_tree::NodeRef<'_, scraper::Node>, out: &mut String) {
+            match node.value() {
+                scraper::Node::Text(t) => out.push_str(&t.text),
+                scraper::Node::Element(el) => {
+                    let name = el.name().to_ascii_lowercase();
+                    if matches!(name.as_str(), "script" | "style" | "noscript") {
+                        return; // not rendered -> innerText sees nothing
+                    }
+                    if name == "br" {
+                        out.push('\n');
+                        return;
+                    }
+                    let block = BLOCK_ELEMENTS.contains(&name.as_str());
+                    if block && !out.is_empty() {
+                        // innerText prints one newline before and one after a
+                        // block element ("\n\n" between paragraphs).
+                        out.push('\n');
+                    }
+                    let before = out.len();
+                    for child in node.children() {
+                        walk(child, out);
+                    }
+                    if block && out.len() > before {
+                        out.push('\n');
+                    }
+                }
+                _ => {
+                    for child in node.children() {
+                        walk(child, out);
+                    }
+                }
+            }
+        }
+
+        let mut out = String::new();
+        walk(*root, &mut out);
+        out
+    }
     /// Best-effort PUA decode using ONLY the on-disk font cache (no page).
     /// Tries every cached font (Qidian names its encrypted fonts per book) and
     /// keeps the mapping that resolves the most glyphs. `None` when anything
@@ -551,6 +619,7 @@ impl Qidian {
         }
 
         if text::pua_ratio(&txt) <= 0.05 {
+            eprintln!("[dbg] ch {} raw={} cleaned={}", ch.num, txt.chars().count(), text::clean_text(&txt, &[]).chars().count());
             return Ok(ChapterResult {
                 title,
                 text: text::clean_text(&txt, &[]),
@@ -570,13 +639,13 @@ impl Qidian {
                 ..Default::default()
             });
         }
+        eprintln!("[dbg] ch {} raw={} decoded={} cleaned={}", ch.num, txt.chars().count(), decoded.chars().count(), text::clean_text(&decoded, &[]).chars().count());
         Ok(ChapterResult {
             title,
             text: text::clean_text(&decoded, &[]),
             ..Default::default()
         })
     }
-
     /// The paywall: a lock marker in the body text, or the VIP limit overlay
     /// being present.
     async fn is_locked(body: &str, s: &Session) -> bool {

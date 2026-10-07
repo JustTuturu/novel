@@ -5,8 +5,10 @@
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use futures::stream::{self, StreamExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::browser::{self, Session};
@@ -47,6 +49,11 @@ enum Command {
         /// Attach to your real browser over CDP, e.g. http://localhost:9222
         #[arg(long)]
         cdp: Option<String>,
+        /// Max concurrent chapter workers. HTTP-fetch workers and browser
+        /// page workers share the budget (browser pages also cap at 3);
+        /// `--jobs 1` is the sequential read.
+        #[arg(long, value_name = "N")]
+        jobs: Option<usize>,
         /// OCR engine for chapters that need it: `sidecar` (default, Python PaddleOCR service) or `native` (in-process Rust/ONNX, no Python needed)
         #[arg(long, value_name = "sidecar|native")]
         ocr_backend: Option<String>,
@@ -83,10 +90,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             only_vip,
             headed,
             cdp,
+            jobs,
             ocr_backend,
         } => {
             apply_ocr_backend(ocr_backend.as_deref())?;
-            extract(&url, &output_dir, limit, start, only_vip, headed, cdp).await
+            extract(
+                &url,
+                &output_dir,
+                limit,
+                start,
+                only_vip,
+                headed,
+                cdp,
+                jobs,
+            )
+            .await
         }
         Command::Login { site, timeout, cdp } => login(&site, timeout, cdp.as_deref()).await,
         Command::Ocr {
@@ -204,6 +222,7 @@ async fn extract(
     only_vip: bool,
     headed: bool,
     cdp: Option<String>,
+    jobs: Option<usize>,
 ) -> Result<()> {
     let r = rule::for_url(url)?;
     println!("--- {}: extract ---", r.name());
@@ -236,63 +255,157 @@ async fn extract(
         selected.truncate(limit);
     }
 
-    let mut combined: Vec<String> = Vec::new();
+    // Phase 3: bounded worker set. HTTP-workers pull server-rendered chapters
+    // over the shared reqwest client; browser workers run DOM/JS-required
+    // renders on page targets multiplexed over the session's own CDP socket.
+    let jobs = jobs.unwrap_or(DEFAULT_HTTP_JOBS).max(1);
+    let http_cap = jobs;
+    let page_cap = jobs.min(DEFAULT_BROWSER_PAGES).max(1);
+
+    let dir = Path::new(output_dir);
+    std::fs::create_dir_all(dir).ok();
+    let base = book.url.trim_end_matches('/').rsplit('/').next().unwrap_or("book");
+    let file = dir.join(format!("{}_{base}.txt", r.name()));
+
+    let session = Arc::new(session);
+    let page_pool = session.page_pool(page_cap)?;
+    let http_sem = Arc::new(tokio::sync::Semaphore::new(http_cap));
     // Phase 2: jittered pacing for everything that goes over the shared HTTP
     // client (Qidian free chapters use it too — the browser is fallback-only).
-    let http_pacer = Pacer::new(HTTP_PACING_BASE_MS, HTTP_PACING_JITTER_MS);
-    for ch in &selected {
-        // Catalog-known-locked chapters are never scheduled at all: no request
-        // and certainly no hammering of the purchase wall.
+    let http_pacer = Arc::new(Pacer::new(HTTP_PACING_BASE_MS, HTTP_PACING_JITTER_MS));
+
+    // Slots for the assembled output, so worker completion order doesn't
+    // matter; `selected` order defines the final chapter order.
+    let slots: Arc<std::sync::Mutex<Vec<Option<ChapterResult>>>> =
+        Arc::new(std::sync::Mutex::new(vec![None; selected.len()]));
+
+    // Catalog-known-locked chapters are never scheduled at all: no request and
+    // certainly no hammering of the purchase wall.
+    let mut pending: Vec<(usize, Chapter)> = Vec::new();
+    for (idx, ch) in selected.iter().enumerate() {
         if ch.is_paid == Some(false) {
             println!("  [{}] {}... LOCKED (catalog)", ch.num, chapter_label(ch));
             continue;
         }
-        if r.chapter_track(ch) == Track::Http {
-            http_pacer.pause().await;
-        }
-        let label = chapter_label(ch);
-        print!("  [{}] {}...", ch.num, label);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-
-        let res: ChapterResult = match r.chapter_parse(ch, &session).await {
-            Ok(res) => res,
-            Err(e) => {
-                println!(" ERROR: {e}");
-                continue;
-            }
-        };
-        if res.locked {
-            println!(" LOCKED (need login / purchase)");
-            continue;
-        }
-        if res.needs_ocr && res.text.is_empty() {
-            println!(" NEEDS OCR");
-            combined.push(format!("# {}\n[OCR needed]", res.title));
-            continue;
-        }
-        let mut note = String::new();
-        if res.needs_ocr {
-            note = " [needs OCR]".to_string();
-        }
-        println!(" {} chars{}", res.text.chars().count(), note);
-        combined.push(format!("# {}\n{}", res.title, res.text));
+        pending.push((idx, ch.clone()));
     }
 
+    let http_for_task = http_sem.clone();
+    let pacer_for_task = http_pacer.clone();
+    let max_in_flight = http_cap.max(page_cap);
+    stream::iter(pending)
+        .map(|(idx, ch)| {
+            let r = r;
+            let session = session.clone();
+            let http_sem = http_for_task.clone();
+            let http_pacer = pacer_for_task.clone();
+            let page_pool = page_pool.clone();
+            async move {
+                let label = chapter_label(&ch);
+                let track = r.chapter_track(&ch);
+                let attempt: Attempt = match track {
+                    Track::Http => {
+                        // Shared-client slot + jittered spacing.
+                        let Ok(_permit) = http_sem.clone().acquire_owned().await else {
+                            return (idx, ch, label, Err(anyhow!("HTTP worker pool closed")));
+                        };
+                        http_pacer.pause().await;
+                        Attempt::Direct(r.chapter_parse(&ch, &session).await)
+                    }
+                    Track::Browser => {
+                        // One page target per in-flight chapter, multiplexed
+                        // over the SAME websocket (`run_on_page` routes every
+                        // session call to this page inside the worker task).
+                        let Ok(lease) = page_pool.acquire().await else {
+                            return (idx, ch, label, Err(anyhow!("browser page pool closed")));
+                        };
+                        let page = lease.page().clone();
+                        let res =
+                            browser::run_on_page(page, r.chapter_parse(&ch, &session)).await;
+                        // `lease` released here.
+                        Attempt::Direct(res)
+                    }
+                };
+                (idx, ch, label, attempt.into_result())
+            }
+        })
+        .buffer_unordered(max_in_flight)
+        .for_each(|(idx, ch, label, res)| {
+            let slots = slots.clone();
+            async move {
+                let res: ChapterResult = match res {
+                    Ok(res) => res,
+                    Err(e) => {
+                        println!("  [{}] {}... ERROR: {e}", ch.num, label);
+                        return;
+                    }
+                };
+                if res.locked {
+                    println!("  [{}] {}... LOCKED (need login / purchase)", ch.num, label);
+                    return;
+                }
+                if res.needs_ocr && res.text.is_empty() {
+                    println!("  [{}] {}... NEEDS OCR", ch.num, label);
+                    slots.lock().unwrap()[idx] = Some(res);
+                    return;
+                }
+                let note = if res.needs_ocr { " [needs OCR]" } else { "" };
+                println!(
+                    "  [{}] {}... {} chars{}",
+                    ch.num,
+                    label,
+                    res.text.chars().count(),
+                    note
+                );
+                slots.lock().unwrap()[idx] = Some(res);
+            }
+        })
+        .await;
+
+    let combined: Vec<String> = slots
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .map(chapter_piece)
+        .collect();
     if combined.is_empty() {
         println!("No chapters extracted.");
         session_shutdown(&session);
         return Ok(());
     }
 
-    let dir = Path::new(output_dir);
-    std::fs::create_dir_all(dir).ok();
-    let base = book.url.trim_end_matches('/').rsplit('/').next().unwrap_or("book");
-    let file = dir.join(format!("{}_{base}.txt", r.name()));
     std::fs::write(&file, combined.join("\n\n"))?;
     println!("Saved {} chapters -> {}", combined.len(), file.display());
     session_shutdown(&session);
     Ok(())
+}
+
+enum Attempt {
+    Direct(Result<ChapterResult>),
+}
+
+impl Attempt {
+    fn into_result(self) -> Result<ChapterResult> {
+        match self {
+            Attempt::Direct(res) => res,
+        }
+    }
+}
+
+/// Worker-set defaults: HTTP fetches first (plan range 4–6), browser pages set
+/// to a conservative cap of 3 active targets.
+const DEFAULT_HTTP_JOBS: usize = 4;
+const DEFAULT_BROWSER_PAGES: usize = 3;
+
+/// The per-chapter output piece — byte-compatible with the sequential
+/// extractor's `combined` entries ("# {title}\n{text}", joined by "\n\n").
+fn chapter_piece(res: &ChapterResult) -> String {
+    if res.needs_ocr && res.text.is_empty() {
+        format!("# {}\n[OCR needed]", res.title)
+    } else {
+        format!("# {}\n{}", res.title, res.text)
+    }
 }
 
 async fn open_session(site: &str, cdp: Option<&str>, headed: bool) -> Result<Session> {

@@ -115,6 +115,9 @@ pub fn replace_map(text: &str, map: &HashMap<char, char>) -> String {
 }
 
 /// Text of the first match of `sel`, joined with `sep` (goquery's get_text).
+/// Kept for parity with the Python/Go ports (the Phase 2 qidian HTTP path
+/// switched to its own innerText emulation).
+#[allow(dead_code)]
 pub fn text_of(doc: &Html, sel: &Selector, sep: &str) -> String {
     // ElementRef::text() yields the descendant text nodes, which is exactly
     // goquery's get_text(sep).

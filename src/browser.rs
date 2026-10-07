@@ -285,12 +285,14 @@ fn eval_value(result: &Value) -> Result<Value> {
 // Handles
 // ---------------------------------------------------------------------------
 
-/// The browser-level CDP connection.
+/// The browser-level CDP connection (cheap to clone; only an Arc inside).
+#[derive(Clone)]
 pub struct BrowserHandle {
     cdp: Arc<Cdp>,
 }
 
 /// One flat-attached page target.
+#[derive(Clone)]
 pub struct Page {
     cdp: Arc<Cdp>,
     session_id: String,
@@ -482,6 +484,101 @@ fn cdp_fail(url: &str, err: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Page pool — many targets over the same multiplexed websocket (Phase 3)
+// ---------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// Set on the worker task while it runs a chapter on a page from the
+    /// [`PagePool`]; `Session` routes its navigation/eval calls there instead
+    /// of the main page. (The CDP transport is already sessionId-tagged, so
+    /// any number of targets can interleave over the one websocket.)
+    static TASK_PAGE: Arc<Page>;
+}
+
+/// A bounded set of live browser page targets over the SAME multiplexed CDP
+/// websocket. `acquire` reserves one of `cap` slots (semaphore) and opens a
+/// page target; the returned [`PooledPage`] is released back into the pool
+/// when dropped, so later workers reuse the target instead of churning new
+/// ones.
+pub struct PagePool {
+    browser: Option<BrowserHandle>,
+    slots: Arc<tokio::sync::Semaphore>,
+    idle: Mutex<Vec<Arc<Page>>>,
+}
+
+impl PagePool {
+    pub fn new(browser: &BrowserHandle, cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            browser: Some(browser.clone()),
+            slots: Arc::new(tokio::sync::Semaphore::new(cap.max(1))),
+            idle: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Reserve a slot and hand out a page target.
+    pub async fn acquire(self: &Arc<Self>) -> Result<PooledPage> {
+        let permit = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("page pool closed"))?;
+        let page = match self.idle.lock().unwrap().pop() {
+            Some(p) => p,
+            None => {
+                let fresh = self
+                    .browser
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("no browser: call start()/attach() first"))?
+                    .new_page()
+                    .await
+                    .context("page pool: opening a page")?;
+                let fresh = Arc::new(fresh);
+                fresh.enable().await.context("enabling Page/Runtime")?;
+                // Stealth init is document-scoped, so each pooled page needs
+                // its own copy of the script (already true of the main page).
+                fresh.add_init_script(STEALTH_JS).await.ok();
+                fresh
+            }
+        };
+        Ok(PooledPage {
+            pool: self.clone(),
+            page,
+            _permit: permit,
+        })
+    }
+}
+
+/// A checked-out page from a [`PagePool`] (RAII: dropping returns the page).
+pub struct PooledPage {
+    pool: Arc<PagePool>,
+    page: Arc<Page>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PooledPage {
+    pub fn page(&self) -> &Arc<Page> {
+        &self.page
+    }
+}
+
+impl Drop for PooledPage {
+    fn drop(&mut self) {
+        self.pool.idle.lock().unwrap().push(self.page.clone());
+    }
+}
+
+/// Run `fut` with every [`Session`] call that touches the page routed to
+/// `pool_page` — the worker's own task executes the future, which is what the
+/// tokio task-local requires.
+pub async fn run_on_page<F, T>(pool_page: Arc<Page>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    TASK_PAGE.scope(pool_page, fut).await
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -503,6 +600,20 @@ impl Drop for Session {
 }
 
 impl Session {
+    /// The page this call should act on: the task-local pooled page when the
+    /// caller is a worker (`run_on_page`), else the session's main page.
+    fn active_page(&self) -> Result<Arc<Page>> {
+        if let Ok(p) = TASK_PAGE.try_with(Arc::clone) {
+            return Ok(p);
+        }
+        let page = self
+            .page
+            .as_ref()
+            .ok_or_else(|| anyhow!("no page: call start()/attach() first"))?
+            .clone();
+        Ok(Arc::new(page))
+    }
+
     fn http_client() -> Result<Client> {
         Ok(Client::builder()
             .timeout(Duration::from_secs(20))
@@ -591,10 +702,15 @@ impl Session {
         self.attached
     }
 
-    pub fn page(&self) -> Result<&Page> {
-        self.page
-            .as_ref()
-            .ok_or_else(|| anyhow!("no page: call start()/attach() first"))
+    pub fn page(&self) -> Result<Arc<Page>> {
+        self.active_page()
+    }
+
+    /// Pool of browser pages over the session's own (multiplexed) CDP
+    /// websocket, for the concurrent chapter workers of `extract`.
+    pub fn page_pool(&self, cap: usize) -> Result<Arc<PagePool>> {
+        let b = self.browser()?;
+        Ok(PagePool::new(b, cap))
     }
 
     pub fn browser(&self) -> Result<&BrowserHandle> {
@@ -638,14 +754,14 @@ impl Session {
     // --- navigation / DOM ------------------------------------------------
 
     pub async fn goto(&self, url: &str) -> Result<()> {
-        self.page()?.navigate(url).await?;
+        self.active_page()?.navigate(url).await?;
         // Give the SPA a moment, like the Python version's 1.5s settle.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         Ok(())
     }
 
     pub async fn content(&self) -> Result<String> {
-        self.page()?.content().await
+        self.active_page()?.content().await
     }
 
     pub async fn soup(&self, url: &str) -> Result<Html> {
@@ -705,7 +821,7 @@ impl Session {
             Some(v) => format!("({wrapped})({v})"),
             None => format!("({wrapped})(undefined)"),
         };
-        let raw = self.page()?.evaluate_raw(decl.as_str()).await?;
+        let raw = self.active_page()?.evaluate_raw(decl.as_str()).await?;
         // A JSON string result needs one more decode pass.
         let text = match raw {
             Value::String(s) => s,
@@ -725,7 +841,7 @@ impl Session {
 
     /// textContent of the first selector that matches.
     pub async fn text_of(&self, sel: &str) -> Result<String> {
-        match self.page()?.inner(sel, "innerText").await? {
+        match self.active_page()?.inner(sel, "innerText").await? {
             Some(t) => Ok(t.trim().to_string()),
             None => Err(anyhow!("no element for {sel}")),
         }
@@ -733,7 +849,7 @@ impl Session {
 
     /// innerHTML of the first selector that matches.
     pub async fn html_of(&self, sel: &str) -> Result<String> {
-        match self.page()?.inner(sel, "innerHTML").await? {
+        match self.active_page()?.inner(sel, "innerHTML").await? {
             Some(t) => Ok(t),
             None => Err(anyhow!("no element for {sel}")),
         }
@@ -743,7 +859,8 @@ impl Session {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(path, self.page()?.screenshot_png().await?)?;
+        let png = self.active_page()?.screenshot_png().await?;
+        std::fs::write(path, png)?;
         Ok(())
     }
 
