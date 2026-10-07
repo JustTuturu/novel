@@ -1,19 +1,21 @@
-# bookqq
+# novel
 
-Extract, clean, and translate Chinese web-novel chapters from **QQ阅读**
-(`book.qq.com`, primary) and **起点 (Qidian)** (`book.qidian.com`), including
-VIP chapters via cookie-authenticated browser sessions.
-
-Catalog/VIP logic ported from the QQBook rule of
+Download Chinese web novels from **起点 (qidian.com)** and **SF轻小说
+(sfacg.com)**, then clean and translate them. Site rules are ported from
 [404-novel-project/novel-downloader](https://github.com/404-novel-project/novel-downloader).
+
+Only two sites are supported; everything else was removed.
 
 ## Requirements
 
 - Python 3.12 (managed with `uv`)
-- Playwright Chromium binary (path set in `bookqq/dom.py`): `uv run playwright install chromium`
-- EasyOCR (models auto-download on first use to `models/easyocr/`)
+- A Chromium-family browser — Brave is auto-detected at `/opt/brave.com/brave-origin/brave`,
+  override with `NOVEL_BROWSER=/path/to/browser`; fallback is Playwright's Chromium
+  (`uv run playwright install chromium`)
+- OCR (PaddleOCR) is used for the two hard cases: Qidian's encrypted font glyphs
+  and SFACG's VIP chapter images
 
-## Installation
+## Install
 
 ```bash
 uv sync
@@ -21,80 +23,72 @@ uv sync
 
 ## Usage
 
-One CLI (`bookqq`), four subcommands:
-
 ```bash
-# OCR a folder of screenshots -> outputs/<folder>_cleaned.txt
-uv run bookqq ocr path/to/screenshots
+# Extract a whole book (free chapters unless logged in)
+uv run novel extract https://www.qidian.com/book/1010868264/
+uv run novel extract https://book.sfacg.com/Novel/755866/
 
-# Extract a whole book (or single chapter) via browser DOM
-uv run bookqq extract https://book.qq.com/book-detail/46077914/
-uv run bookqq extract https://book.qq.com/book-read/46077914/2/
-uv run bookqq extract --single https://book.qq.com/book-read/46077914/2/   # force single-page mode
+# Filters
+uv run novel extract <url> --start 50        # from chapter 50 on
+uv run novel extract <url> --only-vip        # VIP chapters only
+uv run novel extract <url> --limit 10        # first 10 chapters
 
-# Translate an extracted file (zh -> vi, character names kept as pinyin)
-uv run bookqq translate outputs/46077914.txt                # -> outputs/46077914_vi.txt
-uv run bookqq translate outputs/46077914.txt out_vi.txt     # custom output path
+# Log in once (headed), then VIP chapters unlock
+uv run novel login qidian
+uv run novel login sfacg
 
-# VIP QQ阅读 downloader (cookie-authenticated; see below)
-uv run bookqq bookqq --bid 46077914 --limit 5
-uv run bookqq bookqq --bid 46077914 --start-cid 442
+# OCR a folder of screenshots
+uv run novel ocr path/to/screenshots
+
+# Translate extracted text (zh -> vi)
+uv run novel translate outputs/qidian_诡秘之主.txt
 ```
 
-Every subcommand accepts `--output-dir` (default `outputs`). Run
-`uv run bookqq <subcommand> --help` for per-command options.
+Useful flags: `--output-dir` (default `outputs`), `--headed`, `--cdp http://localhost:9222`
+to attach to your own already-running browser instead of launching one.
 
-## VIP QQ阅读 extraction
+## VIP handling
 
-Unlocks VIP chapters by injecting your `ywguid`/`ywkey` cookies into a real
-Chromium context, then extracts via the SSR `book-read` page. The chapter
-catalog is pulled from the web reader's JSON API
-(`/api/book/detail/chapters?bid={bid}`), with the DOM catalog
-(`li.list` rows in `.tab-panel`/`.book-dir`, `.lock` icon = VIP, per the
-novel-downloader QQBook rule) as fallback, so listings work cookie-free.
+**Qidian** — VIP pages ship text in a custom encrypted font. `qidian.py` renders
+each unknown glyph to a canvas inside the real browser, OCRs the rendered image,
+and builds a glyph→character map (cached in `outputs/qidian_fontmap.json`, keyed
+by font hash), then rewrites the text. Chapters that stay undecodable fall back
+to a screenshot and are reported `NEEDS OCR`.
 
-Put cookies in `.env` (gitignored):
+**SFACG** — VIP chapters are a single image (`#vipImage`). It's fetched with the
+chapter URL as `Referer`, retried while the response is a known failure size, OCRed
+into text, and the image is kept under `outputs/sfacg_<id>_images/`.
+
+Both sites need a logged-in session for chapters you own:
 
 ```env
-QQ_YWGUID=...
-QQ_YWKEY=...
-# optional: QQ_YWSESSION=..., or a full QQ_COOKIE="ywguid=..;ywkey=..;..."
+# .env (gitignored)
+QIDIAN_COOKIE="_csrfToken=...;..."
+SFACG_COOKIE="..."
 ```
 
-`--bid` accepts a bare book id or a full `book.qq.com` URL. Then:
-
-```bash
-uv run bookqq bookqq --bid 46077914 --start-cid 442   # VIP cids 442..end
-uv run bookqq bookqq --bid 46077914 --limit 5         # first 5 chapters
-uv run bookqq bookqq --bid 46077914 --probe           # dump one chapter + capture the live content API/XHR
-uv run bookqq bookqq --bid 46077914 --probe-api       # show what the pure-JSON route needs
-```
-
-Output: `outputs/qqbook_{bid}_ch{cid}.txt` per chapter, plus a merged
-`outputs/qqbook_{bid}.txt`. Without valid cookies, VIP chapters are reported
-`LOCKED`; free chapters still extract.
+or run `novel login <site>` to capture a browser session into
+`outputs/<site>_storage.json`.
 
 ## Structure
 
 ```
-src/bookqq/            # the installable package
-  cli.py              # unified `bookqq` entry point (subcommands)
-  config.py           # .env loading + QQ cookie helpers
-  cleaner.py          # TextCleaner: strips reader UI / OCR noise
-  ocr.py              # OCREngine: EasyOCR folder recognition
-  dom.py              # DomExtractor: Playwright extraction + font deobfuscation
-  bookqq.py           # VIP QQ阅读: catalog API + cookie-authenticated downloader
-  translate.py        # Translator: zh -> vi via Google Translate
-outputs/              # generated text files
-screenshots/          # sample chapter screenshots for OCR
-.env                  # local secrets (gitignored)
+src/novel/
+  cli.py       # `novel` entry point (extract/login/ocr/translate)
+  base.py      # Rule base class, Chapter/Book/ChapterResult, rule registry
+  browser.py   # BrowserSession (Playwright + stealth, CDP attach, HTTP fetch)
+  qidian.py    # Qidian rule + glyph-map OCR decoding
+  sfacg.py     # SFACG rule + VIP image OCR
+  login.py     # interactive session capture
+  ocr.py       # PaddleOCR wrapper
+  cleaner.py   # text noise stripping
+  translate.py # zh -> vi translation
+outputs/       # extracted .txt files, fonts maps, OCR images
 ```
 
 ## Notes
 
-- OCR results: EasyOCR returns each detection as `(bbox, text, confidence)`;
-  the processor reads `item[1]` (the text).
-- QQ Books font-embeds chapter text in random-named tags; `DomExtractor`
-  recovers plaintext from those attribute values (`_decrypt_node`). PUA glyphs
-  it can't resolve are flagged as needing OCR.
-- Custom Playwright Chromium path is set in `bookqq/dom.py` (`BINARY`).
+- Chapters you don't own are reported `LOCKED` and skipped; nothing bypasses
+  purchase walls.
+- Automation detection is real: both sites fingerprint the browser. Prefer
+  `--cdp` against your daily browser for VIP work.

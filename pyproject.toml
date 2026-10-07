@@ -1,7 +1,7 @@
 [project]
-name = "bookqq"
+name = "novel"
 version = "0.2.0"
-description = "Extract, clean, and translate Chinese web-novel chapters (Qidian / QQ阅读)"
+description = "Download, clean, and translate Chinese web novels (Qidian, SFACG)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -17,14 +17,14 @@ dependencies = [
 ]
 
 [project.scripts]
-bookqq = "bookqq.cli:main"
+novel = "novel.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bookqq"]
+packages = ["src/novel"]
 
 [tool.pyright]
 venvPath = "."

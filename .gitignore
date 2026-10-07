@@ -18,7 +18,7 @@ models/
 
 # Secrets
 .env
-outputs/qq_storage.json
+outputs/*_storage.json
 
 # Output files
 outputs/

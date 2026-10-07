@@ -38,8 +38,22 @@ class OCREngine:
                 lang_list=langs, gpu=gpu, download_enabled=True
             )
 
+    def image_text(self, path: str, join: str = "\n") -> str:
+        """Recognize one image file -> text. `join`="" keeps characters of the
+        same line adjacent (used for glyph-map rows)."""
+        results = cast(
+            list[Sequence[object]], self.reader.readtext(path, detail=1)
+        )
+        parts: list[str] = []
+        for item in results:
+            if len(item) >= 2:
+                text = item[1]
+                if isinstance(text, str):
+                    parts.append(text)
+        return join.join(parts)
+
     def process_folder(self, folder_path: str) -> str:
-        valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff")
+        valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp")
         image_files = [
             f
             for f in os.listdir(folder_path)
@@ -58,12 +72,18 @@ class OCREngine:
         full_text: list[str] = []
         for path in image_paths:
             print(f"Processing {path}...")
-            results = cast(
-                list[Sequence[object]], self.reader.readtext(path, detail=1)
-            )
-            for item in results:
-                if len(item) >= 2:
-                    text = item[1]
-                    if isinstance(text, str):
-                        full_text.append(text)
+            text = self.image_text(path, join="\n")
+            if text:
+                full_text.append(text)
         return "\n".join(full_text)
+
+
+_ENGINE: OCREngine | None = None
+
+
+def get_engine(lang: str = "ch", gpu: bool = False) -> OCREngine:
+    """Process-wide OCR engine (loading EasyOCR models is expensive)."""
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = OCREngine(lang=lang, gpu=gpu)
+    return _ENGINE
