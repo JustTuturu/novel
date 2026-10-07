@@ -7,8 +7,8 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use crate::browser::{self, Session};
@@ -195,9 +195,11 @@ impl Pacer {
     }
 }
 
-/// HTTP pacing constants keeping us clear of the sites' rate limits.
-const HTTP_PACING_BASE_MS: u64 = 150;
-const HTTP_PACING_JITTER_MS: u64 = 350;
+/// HTTP pacing constants keeping us clear of the sites' rate limits. The
+/// spacing is reserved globally (one shared `Pacer`) so parallel workers
+/// spread their fetches instead of firing together.
+const HTTP_PACING_BASE_MS: u64 = 800;
+const HTTP_PACING_JITTER_MS: u64 = 600;
 
 /// `section / title`, or just the title when there is no section.
 fn chapter_label(ch: &Chapter) -> String {
@@ -262,11 +264,6 @@ async fn extract(
     let http_cap = jobs;
     let page_cap = jobs.min(DEFAULT_BROWSER_PAGES).max(1);
 
-    let dir = Path::new(output_dir);
-    std::fs::create_dir_all(dir).ok();
-    let base = book.url.trim_end_matches('/').rsplit('/').next().unwrap_or("book");
-    let file = dir.join(format!("{}_{base}.txt", r.name()));
-
     let session = Arc::new(session);
     let page_pool = session.page_pool(page_cap)?;
     let http_sem = Arc::new(tokio::sync::Semaphore::new(http_cap));
@@ -274,21 +271,41 @@ async fn extract(
     // client (Qidian free chapters use it too — the browser is fallback-only).
     let http_pacer = Arc::new(Pacer::new(HTTP_PACING_BASE_MS, HTTP_PACING_JITTER_MS));
 
-    // Slots for the assembled output, so worker completion order doesn't
-    // matter; `selected` order defines the final chapter order.
-    let slots: Arc<std::sync::Mutex<Vec<Option<ChapterResult>>>> =
-        Arc::new(std::sync::Mutex::new(vec![None; selected.len()]));
+    let dir = Path::new(output_dir);
+    std::fs::create_dir_all(dir).ok();
+    let base = book.url.trim_end_matches('/').rsplit('/').next().unwrap_or("book");
+    let file = dir.join(format!("{}_{base}.txt", r.name()));
+    // Phase 5: every finished chapter lands here immediately, so an
+    // interrupted run (or a crashed one — kill -9 safe) can resume from disk.
+    let chapters_dir = dir.join(format!("{}_{}_chapters", r.name(), base));
+    std::fs::create_dir_all(&chapters_dir).ok();
+
+    let total = selected.len();
+    let done = Arc::new(AtomicUsize::new(0));
+    let failures: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Catalog-known-locked chapters are never scheduled at all: no request and
-    // certainly no hammering of the purchase wall.
+    // certainly no hammering of the purchase wall. Already-extracted chapters
+    // (NNNN.txt on disk from a previous run) resume-skip.
     let mut pending: Vec<(usize, Chapter)> = Vec::new();
     for (idx, ch) in selected.iter().enumerate() {
         if ch.is_paid == Some(false) {
-            println!("  [{}] {}... LOCKED (catalog)", ch.num, chapter_label(ch));
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            println!("  [{n}/{total}] {}... LOCKED (catalog)", chapter_label(ch));
+            continue;
+        }
+        if chapters_dir.join(format!("{:04}.txt", ch.num)).exists() {
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            println!("  [{n}/{total}] {}... resumed", chapter_label(ch));
             continue;
         }
         pending.push((idx, ch.clone()));
     }
+
+    // Slots for the assembled output, so worker completion order doesn't
+    // matter; `selected` order defines the final chapter order.
+    let slots: Arc<StdMutex<Vec<Option<String>>>> = Arc::new(StdMutex::new(vec![None; selected.len()]));
 
     let http_for_task = http_sem.clone();
     let pacer_for_task = http_pacer.clone();
@@ -332,42 +349,76 @@ async fn extract(
         .buffer_unordered(max_in_flight)
         .for_each(|(idx, ch, label, res)| {
             let slots = slots.clone();
+            let done = done.clone();
+            let failures = failures.clone();
+            let chapters_dir = chapters_dir.clone();
             async move {
+                let k = done.fetch_add(1, Ordering::Relaxed) + 1;
                 let res: ChapterResult = match res {
                     Ok(res) => res,
                     Err(e) => {
-                        println!("  [{}] {}... ERROR: {e}", ch.num, label);
+                        failures.lock().unwrap().push(format!("{label}: {e}"));
+                        println!("  [{k}/{total}] {label}... ERROR: {e}");
                         return;
                     }
                 };
                 if res.locked {
-                    println!("  [{}] {}... LOCKED (need login / purchase)", ch.num, label);
+                    println!("  [{k}/{total}] {label}... LOCKED (need login / purchase)");
                     return;
                 }
-                if res.needs_ocr && res.text.is_empty() {
-                    println!("  [{}] {}... NEEDS OCR", ch.num, label);
-                    slots.lock().unwrap()[idx] = Some(res);
+                let piece = chapter_piece(&res);
+                // Write the finished chapter file right away; the book txt is
+                // assembled after the run from the chapter directory (Phase 5).
+                let path = chapters_dir.join(format!("{:04}.txt", ch.num));
+                if let Err(e) = std::fs::write(&path, &piece) {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("{label}: writing {}: {e}", path.display()));
+                    println!("  [{k}/{total}] {label}... ERROR: {e}");
                     return;
                 }
+                slots.lock().unwrap()[idx] = Some(piece);
                 let note = if res.needs_ocr { " [needs OCR]" } else { "" };
                 println!(
-                    "  [{}] {}... {} chars{}",
-                    ch.num,
-                    label,
+                    "  [{k}/{total}] {label}... {} chars{}",
                     res.text.chars().count(),
                     note
                 );
-                slots.lock().unwrap()[idx] = Some(res);
             }
         })
         .await;
 
-    let combined: Vec<String> = slots
-        .lock()
-        .unwrap()
+    // Phase 5: assemble the book txt from the chapter directory (so resumed
+    // chapters from earlier runs are included, in catalog order).
+    let mut chapter_files: Vec<(usize, PathBuf)> = std::fs::read_dir(&chapters_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().and_then(|e| e.to_str()) == Some("txt")
+                        && p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+                })
+                .map(|p| {
+                    let num = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    (num, p)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    chapter_files.sort_by_key(|(num, _)| *num);
+    chapter_files.dedup_by_key(|(num, _)| *num);
+
+    let combined: Vec<String> = chapter_files
         .iter()
-        .flatten()
-        .map(chapter_piece)
+        .filter_map(|(_, p)| std::fs::read_to_string(p).ok())
         .collect();
     if combined.is_empty() {
         println!("No chapters extracted.");
@@ -377,6 +428,13 @@ async fn extract(
 
     std::fs::write(&file, combined.join("\n\n"))?;
     println!("Saved {} chapters -> {}", combined.len(), file.display());
+    let failed = failures.lock().unwrap();
+    if !failed.is_empty() {
+        println!("Failures ({}):", failed.len());
+        for f in failed.iter() {
+            println!("  {f}");
+        }
+    }
     session_shutdown(&session);
     Ok(())
 }
