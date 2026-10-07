@@ -51,7 +51,7 @@ type ocrRequest struct {
 }
 
 type ocrResponse struct {
-	Text string `json:"text"`
+	Text  string `json:"text"`
 	Error string `json:"error,omitempty"`
 }
 

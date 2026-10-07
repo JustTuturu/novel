@@ -17,6 +17,8 @@ import (
 	"novel/internal/rule"
 	"novel/internal/translate"
 
+	"github.com/mxschmitt/playwright-go"
+
 	// Import the site rules so they register themselves.
 	_ "novel/internal/qidian"
 	_ "novel/internal/sfacg"
@@ -40,6 +42,8 @@ func Run(argv []string) int {
 	case "help", "-h", "--help":
 		usage()
 		return 0
+	case "install":
+		return cmdInstall(argv[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", argv[1])
 		usage()
@@ -55,6 +59,7 @@ Usage:
   novel login --site <site>       Save a logged-in session for a site
   novel ocr <file-or-folder>      OCR images -> cleaned text
   novel translate <in> [out]      Translate extracted text (zh -> vi)
+  novel install [browser...]      Download the Playwright browser driver(s)
 
 Extract flags:
   --output-dir DIR   where to write chapters (default "outputs")
@@ -64,6 +69,21 @@ Extract flags:
   --headed           show the browser window
   --cdp URL          attach to your real browser (e.g. http://localhost:9222)
 `)
+}
+
+// cmdInstall downloads the Playwright driver(s). Needed once before the first
+// run; playwright-go reports "please install the driver (vX.Y.Z) first" if not.
+func cmdInstall(args []string) int {
+	browsers := args
+	if len(browsers) == 0 {
+		browsers = []string{"chromium"}
+	}
+	if err := playwright.Install(); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Installed: %s\n", strings.Join(browsers, ", "))
+	return 0
 }
 
 func cmdExtract(args []string) int {

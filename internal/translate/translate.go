@@ -124,7 +124,7 @@ func (t *Translator) Paragraph(para string) string {
 	return restoreNames(translated, reverse)
 }
 
-var wordCountRE = regexp.MustCompile(`\b\d+\u3000\u3000`)
+var wordCountRE = regexp.MustCompile(`\b\d+\x{3000}\x{3000}`)
 
 // File translates input -> output. Headers ("# ...") and blank lines pass
 // through; every other line is translated with a blank line between results.

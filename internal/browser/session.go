@@ -105,9 +105,9 @@ func (s *Session) Start(cookies []Cookie, storageState string, headless bool) er
 		args = append(args, "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage")
 	}
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless:         playwright.Bool(headless),
-		ExecutablePath:   playwright.String(Binary()),
-		Args:             args,
+		Headless:       playwright.Bool(headless),
+		ExecutablePath: playwright.String(Binary()),
+		Args:           args,
 		IgnoreDefaultArgs: []string{
 			"--enable-automation",
 			"--disable-component-extensions-with-background-pages",
@@ -123,10 +123,10 @@ func (s *Session) Start(cookies []Cookie, storageState string, headless bool) er
 	s.browser = browser
 
 	opts := playwright.BrowserNewContextOptions{
-		Viewport:    &playwright.Size{Width: 1920, Height: 1080},
-		UserAgent:   playwright.String(UA),
-		Locale:      playwright.String("zh-CN"),
-		TimezoneId:  playwright.String("Asia/Shanghai"),
+		Viewport:   &playwright.Size{Width: 1920, Height: 1080},
+		UserAgent:  playwright.String(UA),
+		Locale:     playwright.String("zh-CN"),
+		TimezoneId: playwright.String("Asia/Shanghai"),
 	}
 	if storageState != "" {
 		opts.StorageStatePath = playwright.String(storageState)

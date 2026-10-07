@@ -20,7 +20,7 @@ var storageStates = map[string]string{
 }
 
 var (
-	envOnce sync.Once
+	envOnce      sync.Once
 	cookieDomain = map[string]string{
 		"qidian": ".qidian.com",
 		"sfacg":  ".sfacg.com",
