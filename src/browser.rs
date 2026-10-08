@@ -296,7 +296,6 @@ pub struct BrowserHandle {
 pub struct Page {
     cdp: Arc<Cdp>,
     session_id: String,
-    target_id: String,
 }
 
 impl BrowserHandle {
@@ -329,7 +328,6 @@ impl BrowserHandle {
         Ok(Page {
             cdp: self.cdp.clone(),
             session_id,
-            target_id,
         })
     }
 
@@ -370,14 +368,6 @@ impl BrowserHandle {
 }
 
 impl Page {
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn target_id(&self) -> &str {
-        &self.target_id
-    }
-
     async fn enable(&self) -> Result<()> {
         self.cdp.call("Page.enable", json!({}), Some(&self.session_id)).await?;
         self.cdp
@@ -589,7 +579,6 @@ pub struct Session {
     browser: Option<BrowserHandle>,
     page: Option<Page>,
     client: Client,
-    attached: bool,
     /// Kept so `Drop` can kill the browser we launched (never for `--cdp`).
     child: Mutex<Option<tokio::process::Child>>,
 }
@@ -655,7 +644,6 @@ impl Session {
             browser: Some(browser),
             page: Some(page),
             client: Self::http_client()?,
-            attached: false,
             child: Mutex::new(Some(child)),
         })
     }
@@ -696,17 +684,8 @@ impl Session {
             browser: Some(browser),
             page: Some(page),
             client: Self::http_client()?,
-            attached: true,
             child: Mutex::new(None),
         })
-    }
-
-    pub fn attached(&self) -> bool {
-        self.attached
-    }
-
-    pub fn page(&self) -> Result<Arc<Page>> {
-        self.active_page()
     }
 
     /// Pool of browser pages over the session's own (multiplexed) CDP
@@ -845,14 +824,6 @@ impl Session {
     pub async fn text_of(&self, sel: &str) -> Result<String> {
         match self.active_page()?.inner(sel, "innerText").await? {
             Some(t) => Ok(t.trim().to_string()),
-            None => Err(anyhow!("no element for {sel}")),
-        }
-    }
-
-    /// innerHTML of the first selector that matches.
-    pub async fn html_of(&self, sel: &str) -> Result<String> {
-        match self.active_page()?.inner(sel, "innerHTML").await? {
-            Some(t) => Ok(t),
             None => Err(anyhow!("no element for {sel}")),
         }
     }
@@ -1121,22 +1092,4 @@ fn cookie_params(cs: &[Cookie]) -> Vec<Value> {
 /// Compile a CSS selector, panicking on bad syntax at development time.
 pub fn selector(css: &str) -> Selector {
     Selector::parse(css).unwrap_or_else(|e| panic!("bad selector {css:?}: {e}"))
-}
-
-/// Read a Playwright/Python storage-state file into cookies.
-pub fn load_cookies(path: &str) -> Result<Vec<Cookie>> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-    let v: serde_json::Value = serde_json::from_str(&raw)?;
-    let mut out = Vec::new();
-    if let Some(arr) = v.get("cookies").and_then(|c| c.as_array()) {
-        for c in arr {
-            out.push(Cookie {
-                name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                path: c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string(),
-            });
-        }
-    }
-    Ok(out)
 }

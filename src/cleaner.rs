@@ -26,11 +26,6 @@ fn footer_anchors() -> &'static Vec<Regex> {
     })
 }
 
-fn pua_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new("[\u{e000}-\u{f8ff}]").unwrap())
-}
-
 /// (pattern, replacement) pairs applied in order by normalise_lines.
 fn normalisers() -> &'static Vec<(Regex, &'static str)> {
     static V: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
@@ -90,11 +85,6 @@ fn collapse_spaces() -> &'static Regex {
 pub struct TextCleaner;
 
 impl TextCleaner {
-    pub fn is_obfuscated(&self, text: &str) -> bool {
-        !text.is_empty()
-            && pua_re().find_iter(text).count() as f64 / text.chars().count() as f64 > 0.05
-    }
-
     pub fn clean(&self, text: &str) -> String {
         if text.is_empty() {
             return String::new();

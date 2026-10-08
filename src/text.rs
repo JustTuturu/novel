@@ -10,16 +10,6 @@ fn pua_re() -> &'static Regex {
     R.get_or_init(|| Regex::new("[\u{e000}-\u{f8ff}]").unwrap())
 }
 
-fn single_cjk_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(
-            "^[\u{3400}-\u{4dbf}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{2018}\u{2019}\u{201c}\u{201d}\u{3000}\u{3001}\u{3002}\u{ff0c}\u{ff01}\u{ff1a}\u{ff1b}\u{ff08}\u{ff09}\u{2026}]$",
-        )
-        .unwrap()
-    })
-}
-
 fn noise_patterns() -> &'static Vec<Regex> {
     static P: OnceLock<Vec<Regex>> = OnceLock::new();
     P.get_or_init(|| {
@@ -46,34 +36,6 @@ fn noise_patterns() -> &'static Vec<Regex> {
 fn collapse_blank_lines() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"\n{3,}").unwrap())
-}
-
-/// Recover plaintext from attribute-based font obfuscation (parity with Go;
-/// the live rules use text_content + glyph maps).
-pub fn decrypt_html(html: &str) -> String {
-    let doc = Html::parse_document(html);
-    let root = doc.tree.root();
-    decrypt_node(root)
-}
-
-fn decrypt_node(node: ego_tree::NodeRef<'_, scraper::Node>) -> String {
-    match node.value() {
-        scraper::Node::Text(t) => t.text.to_string(),
-        scraper::Node::Element(el) => {
-            if el.name().eq_ignore_ascii_case("br") {
-                return "\n".to_string();
-            }
-            // A single-CJK attribute value is the real character; the visible
-            // text is the font-mapped decoy and must be dropped.
-            for (_name, value) in el.attrs() {
-                if single_cjk_re().is_match(value) {
-                    return value.to_string();
-                }
-            }
-            node.children().map(decrypt_node).collect()
-        }
-        _ => node.children().map(decrypt_node).collect(),
-    }
 }
 
 pub fn clean_text(text: &str, extra: &[&Regex]) -> String {
@@ -133,15 +95,8 @@ pub fn text_of(doc: &Html, sel: &Selector, sep: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn text_of_first(doc: &Html, sel: &str, sep: &str) -> String {
-    match Selector::parse(sel) {
-        Ok(s) => text_of(doc, &s, sep),
-        Err(_) => String::new(),
-    }
-}
-
-
 /// Visible text of a subtree, block boundaries as newlines (get_text("\n")).
+#[allow(dead_code)]
 pub fn block_text(node: ego_tree::NodeRef<'_, scraper::Node>) -> String {
     const BLOCK: &[&str] = &[
         "p", "div", "br", "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "section",
@@ -160,12 +115,5 @@ pub fn block_text(node: ego_tree::NodeRef<'_, scraper::Node>) -> String {
             out
         }
         _ => node.children().map(block_text).collect(),
-    }
-}
-
-pub fn text_content(node: ego_tree::NodeRef<'_, scraper::Node>) -> String {
-    match node.value() {
-        scraper::Node::Text(t) => t.text.to_string(),
-        _ => node.children().map(text_content).collect(),
     }
 }

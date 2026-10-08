@@ -827,13 +827,9 @@ impl rule::Rule for Qidian {
                 .await
                 .with_context(|| format!("qidian: failed to load {catalog_url}"))?;
             Ok(Book {
-                site: self.name().to_string(),
                 url: format!("https://book.qidian.com/info/{book_id}/"),
                 title: self.meta(&doc, TITLE_CANDIDATES),
                 author: self.meta(&doc, AUTHOR_CANDIDATES),
-                intro: self.meta(&doc, INTRO_CANDIDATES),
-                tags: Vec::new(),
-                cover: String::new(),
                 chapters: self.parse_chapters(&doc),
             })
         })

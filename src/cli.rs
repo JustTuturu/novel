@@ -670,13 +670,3 @@ async fn ocr_folder(target: &str, output_dir: &str) -> Result<()> {
     println!("Saved to {}", file.display());
     Ok(())
 }
-
-/// Print the detected browser binary (used by `novel doctor`).
-pub fn browser_hint() -> String {
-    let b = browser::binary();
-    if b.is_empty() {
-        "no binary configured; chromiumoxide will auto-detect".to_string()
-    } else {
-        b
-    }
-}

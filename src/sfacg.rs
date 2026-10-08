@@ -232,12 +232,10 @@ impl Sfacg {
             .await
             .with_context(|| format!("sfacg: ocr {}", img_path.display()))?;
 
-        let image = img_path.to_string_lossy().into_owned();
         if ocr_text.trim().is_empty() {
             return Ok(ChapterResult {
                 title,
                 text: format!("[VIP chapter saved as image: {}]", img_path.display()),
-                images: vec![image],
                 needs_ocr: true,
                 ..Default::default()
             });
@@ -245,7 +243,6 @@ impl Sfacg {
         Ok(ChapterResult {
             title,
             text: text::clean_text(&ocr_text, &[]),
-            images: vec![image],
             ..Default::default()
         })
     }
@@ -262,9 +259,6 @@ impl rule::Rule for Sfacg {
     // server-rendered article, VIP chapters from an HTTP image fetch.
     fn chapter_track(&self, _ch: &Chapter) -> rule::Track {
         rule::Track::Http
-    }
-    fn concurrency_limit(&self) -> usize {
-        1
     }
     fn storage_state_path(&self) -> String {
         "outputs/sfacg_storage.json".to_string()
@@ -287,18 +281,10 @@ impl rule::Rule for Sfacg {
                 .unwrap_or_default();
 
             Ok(Book {
-                site: self.name().to_string(),
                 url: novel_url,
                 title: bookname.clone(),
                 author: first_of(&doc, &[".author-name"])
                     .map(|el| el_text(el, " "))
-                    .unwrap_or_default(),
-                intro: first_of(&doc, &[".introduce"])
-                    .map(|el| el_text(el, " "))
-                    .unwrap_or_default(),
-                tags: self.parse_tags(&doc),
-                cover: first_of(&doc, &["#hasTicket div.pic img", "div.pic img"])
-                    .and_then(|el| el.attr("src").map(|s| s.to_string()))
                     .unwrap_or_default(),
                 chapters: self.parse_chapters(&doc, &bookname),
             })
@@ -340,11 +326,10 @@ impl rule::Rule for Sfacg {
                 Page::Text {
                     title,
                     text: body,
-                    images,
+                    ..
                 } => Ok(ChapterResult {
                     title,
                     text: body,
-                    images,
                     ..Default::default()
                 }),
             }
@@ -373,11 +358,7 @@ enum Page {
     /// VIP = one long image that has to be fetched and OCRed.
     VipImage { title: String, src: String },
     /// Ordinary text chapter.
-    Text {
-        title: String,
-        text: String,
-        images: Vec<String>,
-    },
+    Text { title: String, text: String },
 }
 
 /// Reads one chapter page: title, paywall state, and whichever of the four
@@ -409,16 +390,9 @@ fn classify(doc: &Html, ch: &Chapter) -> Page {
         return Page::NeedsOcr(title);
     };
 
-    let images: Vec<String> = content
-        .select(&browser::selector("img[src]"))
-        .filter_map(|img| img.attr("src").map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
-        .collect();
-
     Page::Text {
         title,
         text: text::clean_text(&el_text(content, "\n"), &[]),
-        images,
     }
 }
 

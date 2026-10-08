@@ -21,13 +21,9 @@ pub struct Chapter {
 
 #[derive(Debug, Clone)]
 pub struct Book {
-    pub site: String,
     pub url: String,
     pub title: String,
     pub author: String,
-    pub intro: String,
-    pub tags: Vec<String>,
-    pub cover: String,
     pub chapters: Vec<Chapter>,
 }
 
@@ -43,7 +39,6 @@ pub struct ChapterResult {
     pub text: String,
     pub locked: bool,
     pub needs_ocr: bool,
-    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +54,6 @@ pub enum Track {
 pub trait Rule: Send + Sync {
     fn name(&self) -> &'static str;
     fn domains(&self) -> &'static [&'static str];
-    fn concurrency_limit(&self) -> usize {
-        1
-    }
     fn storage_state_path(&self) -> String;
     /// How [`crate::cli::extract`] should fetch this chapter (Phase 2,
     /// HTTP-first): server-rendered pages go through the shared reqwest
