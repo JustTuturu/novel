@@ -106,11 +106,8 @@ impl TextCleaner {
         }
         t = trim_footer(&t);
         t = t
-            .replace('\u{feff}', "")
-            .replace('\u{200b}', "")
-            .replace('\u{a0}', " ")
-            .replace('\u{3000}', " ")
-            .replace('\t', " ");
+            .replace(['\u{feff}', '\u{200b}'], "")
+            .replace(['\u{a0}', '\u{3000}', '\t'], " ");
         normalise_lines(&t)
     }
 }

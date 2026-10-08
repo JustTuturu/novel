@@ -95,10 +95,7 @@ impl RateLimiter {
         loop {
             let wait = {
                 let mut b = self.state.lock().await;
-                match Self::grant_or_wait(&mut b, self.per_minute, Instant::now()) {
-                    Ok(()) => None,
-                    Err(d) => Some(d),
-                }
+                Self::grant_or_wait(&mut b, self.per_minute, Instant::now()).err()
             };
             let Some(d) = wait else { return };
             if !announced {
@@ -356,7 +353,7 @@ impl Translator {
                 system.push_str(&format!(
                     "\n  {} -> {} [importance {}] {}",
                     e.hanzi,
-                    best_translation(&e),
+                    best_translation(e),
                     e.importance,
                     e.role
                 ));

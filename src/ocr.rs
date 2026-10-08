@@ -326,7 +326,7 @@ fn box_bounds(bbox: &oar_ocr::processors::BoundingBox) -> (f32, f32, f32, f32) {
 mod tests {
     use super::*;
 
-    fn det(x: f32, y: f32, w: f32, h: f32, text: &str) -> Detection {
+    fn det(x: f32, y: f32, _w: f32, h: f32, text: &str) -> Detection {
         Detection {
             min_x: x,
             min_y: y,

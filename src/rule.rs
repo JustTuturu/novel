@@ -106,7 +106,7 @@ pub fn for_url(url: &str) -> Result<&'static dyn Rule> {
         let reg = registry().lock().unwrap();
         reg.iter()
             .find(|r| r.domains().iter().any(|d| url.contains(d)))
-            .map(|r| *r)
+            .copied()
     };
     found.ok_or_else(|| {
         anyhow!(

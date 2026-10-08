@@ -116,16 +116,16 @@ pub async fn run(cli: Cli) -> Result<()> {
             cdp,
             jobs,
         } => {
-            extract(
-                &url,
-                &output_dir,
+            extract(ExtractOptions {
+                url,
+                output_dir,
                 limit,
                 start,
                 only_vip,
                 headed,
                 cdp,
                 jobs,
-            )
+            })
             .await
         }
         Command::Login { site, timeout, cdp } => login(&site, timeout, cdp.as_deref()).await,
@@ -233,8 +233,8 @@ async fn glossary_list() -> Result<()> {
     let g = crate::glossary::Glossary::open(std::path::Path::new(crate::glossary::DB_PATH))?;
     let entries = g.all()?;
     println!(
-        "{:>4}  {:<12}  {:<16}  {:>3}  {}",
-        "id", "hanzi", "pinyin", "imp", "role (first seen)"
+        "{:>4}  {:<12}  {:<16}  {:>3}  role (first seen)",
+        "id", "hanzi", "pinyin", "imp"
     );
     for e in entries {
         println!(
@@ -301,22 +301,24 @@ fn truncate_col(s: &str, max: usize) -> String {
     }
 }
 
-async fn extract(
-    url: &str,
-    output_dir: &str,
+struct ExtractOptions {
+    url: String,
+    output_dir: String,
     limit: usize,
     start: usize,
     only_vip: bool,
     headed: bool,
     cdp: Option<String>,
     jobs: Option<usize>,
-) -> Result<()> {
-    let r = rule::for_url(url)?;
-    println!("--- {}: extract ---", r.name());
-    println!("URL: {url}");
+}
 
-    let session = open_session(r.name(), cdp.as_deref(), headed).await?;
-    let book = match r.book_parse(url, &session).await {
+async fn extract(o: ExtractOptions) -> Result<()> {
+    let r = rule::for_url(&o.url)?;
+    println!("--- {}: extract ---", r.name());
+    println!("URL: {}", o.url);
+
+    let session = open_session(r.name(), o.cdp.as_deref(), o.headed).await?;
+    let book = match r.book_parse(&o.url, &session).await {
         Ok(b) => b,
         Err(e) => {
             session_shutdown(&session);
@@ -334,20 +336,20 @@ async fn extract(
     let mut selected: Vec<Chapter> = book
         .chapters
         .iter()
-        .filter(|c| start == 0 || c.num >= start)
-        .filter(|c| !only_vip || c.is_vip)
+        .filter(|c| o.start == 0 || c.num >= o.start)
+        .filter(|c| !o.only_vip || c.is_vip)
         .cloned()
         .collect();
-    if limit > 0 {
-        selected.truncate(limit);
+    if o.limit > 0 {
+        selected.truncate(o.limit);
     }
 
     // Phase 3: bounded worker set. HTTP-workers pull server-rendered chapters
     // over the shared reqwest client; browser workers run DOM/JS-required
     // renders on page targets multiplexed over the session's own CDP socket.
-    let jobs = jobs.unwrap_or(DEFAULT_HTTP_JOBS).max(1);
+    let jobs = o.jobs.unwrap_or(DEFAULT_HTTP_JOBS).max(1);
     let http_cap = jobs;
-    let page_cap = jobs.min(DEFAULT_BROWSER_PAGES).max(1);
+    let page_cap = jobs.clamp(1, DEFAULT_BROWSER_PAGES);
 
     let session = Arc::new(session);
     let page_pool = session.page_pool(page_cap)?;
@@ -356,7 +358,7 @@ async fn extract(
     // client (Qidian free chapters use it too — the browser is fallback-only).
     let http_pacer = Arc::new(Pacer::new(HTTP_PACING_BASE_MS, HTTP_PACING_JITTER_MS));
 
-    let dir = Path::new(output_dir);
+    let dir = Path::new(&o.output_dir);
     std::fs::create_dir_all(dir).ok();
     let base = book.url.trim_end_matches('/').rsplit('/').next().unwrap_or("book");
     let file = dir.join(format!("{}_{base}.txt", r.name()));
@@ -397,7 +399,6 @@ async fn extract(
     let max_in_flight = http_cap.max(page_cap);
     stream::iter(pending)
         .map(|(idx, ch)| {
-            let r = r;
             let session = session.clone();
             let http_sem = http_for_task.clone();
             let http_pacer = pacer_for_task.clone();

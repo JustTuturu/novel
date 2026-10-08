@@ -222,7 +222,7 @@ impl Qidian {
         if let Some(c) = book_id_num_re().captures(url) {
             return c.get(1).map(|m| m.as_str()).unwrap_or(url);
         }
-        url.trim_matches('/').split('/').last().unwrap_or(url)
+        url.trim_matches('/').split('/').next_back().unwrap_or(url)
     }
 
     /// Maps a book URL onto the catalog page for the host that was given.

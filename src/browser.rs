@@ -431,7 +431,7 @@ impl Page {
                 Some(&self.session_id),
             )
             .await
-            .with_context(|| format!("Runtime.evaluate({})", &expression.chars().take(80).collect::<String>()))?;
+            .with_context(|| format!("Runtime.evaluate({})", expression.chars().take(80).collect::<String>()))?;
         eval_value(&res)
     }
 
@@ -472,9 +472,9 @@ impl Page {
             .get("data")
             .and_then(|d| d.as_str())
             .ok_or_else(|| anyhow!("Page.captureScreenshot returned no data"))?;
-        Ok(base64::engine::general_purpose::STANDARD
+        base64::engine::general_purpose::STANDARD
             .decode(data)
-            .context("decoding screenshot base64")?)
+            .context("decoding screenshot base64")
     }
 }
 
@@ -523,7 +523,10 @@ impl PagePool {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("page pool closed"))?;
-        let page = match self.idle.lock().unwrap().pop() {
+        // Pop the idle slot first so the mutex is released before any
+        // `.await` below (holding a std guard across await can stall).
+        let idle_page = self.idle.lock().unwrap().pop();
+        let page = match idle_page {
             Some(p) => p,
             None => {
                 let fresh = self
@@ -777,8 +780,7 @@ impl Session {
     }
 
     pub async fn scroll_to_bottom(&self, max_steps: usize) -> Result<()> {
-        let js = format!(
-            r#"async (maxSteps) => {{
+        let js = r#"async (maxSteps) => {{
                 let total = 0, lastH = 0, stuck = 0;
                 const step = 300;
                 for (let i = 0; i < maxSteps; i++) {{
@@ -793,7 +795,7 @@ impl Session {
                 }}
                 return true;
             }}"#
-        );
+        .to_string();
         self.eval(
             &js,
             Some(serde_json::json!(max_steps)),
@@ -833,7 +835,7 @@ impl Session {
         *out = serde_json::from_str(&text).map_err(|e| {
             anyhow!(
                 "eval decode failed: {e} (raw: {}…)",
-                &text.chars().take(120).collect::<String>()
+                text.chars().take(120).collect::<String>()
             )
         })?;
         Ok(())
