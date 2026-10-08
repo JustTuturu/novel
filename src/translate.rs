@@ -1,4 +1,4 @@
-//! zh -> vi translation via an OpenAI-compatible chat API.
+//! zh -> en translation via an OpenAI-compatible chat API.
 //!
 //! Chapter-by-chapter (replacing the old serial line-by-line Google endpoint):
 //! the input is the assembled book txt, or — preferred when present — the
@@ -214,12 +214,12 @@ fn load_chapters(input: &Path) -> Result<(Vec<ChapterIn>, String)> {
 // Translator
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT: &str = "You are a professional literary translator working from Chinese (simplified) to Vietnamese.\
+const SYSTEM_PROMPT: &str = "You are a professional literary translator working from Chinese (simplified) to English.\
 \nTranslate the chapter given by the user completely and faithfully; do not omit or summarize anything.\
 \nPreserve the paragraph structure (blank lines) of the body.\
 \nUse the known proper-noun translations exactly as given.\
 \nReply with ONLY a JSON object - no markdown fences, no commentary - shaped like:\
-\n{\"title\": \"<chapter title translated into Vietnamese>\", \"translation\": \"<the full Vietnamese translation>\", \"glossary\": [{\"hanzi\": \"<Chinese term>\", \"pinyin\": \"<toneless lowercase pinyin>\", \"role\": \"<what this is and why it matters, in English>\", \"importance\": <1|2|3>}]}\
+\n{\"title\": \"<chapter title translated into English>\", \"translation\": \"<the full English translation>\", \"glossary\": [{\"hanzi\": \"<Chinese term>\", \"pinyin\": \"<toneless lowercase pinyin>\", \"role\": \"<what this is and why it matters, in English>\", \"importance\": <1|2|3>}]}\
 \nThe glossary must list EVERY proper noun you handled (people, places, organizations, sects, titles), including ones already in the known list. importance: 3 = main character or central entity, 2 = named recurring side entity, 1 = minor one-off mention.";
 
 const MAX_RETRIES: usize = 4;
@@ -486,7 +486,7 @@ fn parse_reply(content: &str, fallback_title: &str) -> ChapterOut {
 // ---------------------------------------------------------------------------
 
 /// Translate the whole book at `input` (chapter by chapter, resumable), then
-/// assemble the translated book txt at `output` (or `<stem>_vi.txt`).
+/// assemble the translated book txt at `output` (or `<stem>_en.txt`).
 pub async fn translate_book(
     input: &str,
     output: Option<&str>,
@@ -513,7 +513,7 @@ pub async fn translate_book(
     std::fs::create_dir_all(&translated_dir).ok();
     let out_path = output
         .map(PathBuf::from)
-        .unwrap_or_else(|| parent.join(format!("{stem}_vi.txt")));
+        .unwrap_or_else(|| parent.join(format!("{stem}_en.txt")));
 
     let glossary = Arc::new(Glossary::open(&PathBuf::from(glossary::DB_PATH))?);
     let translator = Translator::new(&stem, per_minute, glossary.clone())?;

@@ -33,7 +33,7 @@ novel login qidian                  # capture a session, then VIP chapters unloc
 novel login sfacg
 
 novel ocr screenshots               # OCR images or a folder of them
-novel translate outputs/sfacg_755866.txt   # zh -> vi, chapter by chapter
+novel translate outputs/sfacg_755866.txt   # zh -> en, chapter by chapter
 ```
 
 Chapters you don't own come back `LOCKED` and are skipped; nothing bypasses a
@@ -121,7 +121,7 @@ src/
   sfacg.rs     # SFACG rule + VIP image OCR
   text.rs      # cleaning, PUA detection, attribute deobfuscation
   cleaner.rs   # OCR-artifact cleanup
-  translate.rs # zh -> vi, chapter by chapter, self-updating glossary
+  translate.rs # zh -> en, chapter by chapter, self-updating glossary
   glossary.rs  # SQLite glossary (RAG retrieval + write-default upserts)
   ocr.rs       # in-process oar-ocr OCR client
   config.rs    # .env, cookies, paths

@@ -70,10 +70,10 @@ enum Command {
         #[arg(long, default_value = "outputs")]
         output_dir: String,
     },
-    /// Translate extracted text (zh -> vi), chapter by chapter
+    /// Translate extracted text (zh -> en), chapter by chapter
     Translate {
         input: String,
-        /// Final assembled translated book txt (default: <input stem>_vi.txt)
+        /// Final assembled translated book txt (default: <input stem>_en.txt)
         output: Option<String>,
         /// Max concurrent API calls
         #[arg(long, default_value_t = 2)]
