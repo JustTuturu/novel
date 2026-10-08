@@ -65,11 +65,11 @@ or run `novel login <site>`, which saves to `outputs/<site>_storage.json`.
 
 One engine: [oar-ocr](https://crates.io/crates/oar-ocr) running PP-OCRv6 ONNX
 models inside the process — no Python, no service, no model downloads at
-runtime. Models aren't bundled; fetch them once:
-
-```bash
-./scripts/fetch_ocr_models.sh     # PP-OCRv6 medium tier, ~138 MB, verifies SHA-256
-```
+runtime. Models aren't bundled, so download them yourself: grab the PP-OCRv6
+**medium** det + rec pair plus the character dictionary (the `oar-ocr` project
+mirrors them on ModelScope under `greatv/oar-ocr` as `pp-ocrv6_medium_det.onnx`,
+`pp-ocrv6_medium_rec.onnx` and `ppocrv6_dict.txt`) and drop the three files
+into `outputs/oar_models/` — or anywhere else, pointed at by `OAR_MODEL_DIR`.
 
 Measurements on a 1920x5511 chapter page: the pinned detection config
 (`limit_side_len = 64 / min`, the values paddlex resolves for PP-OCRv6 det

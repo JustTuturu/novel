@@ -124,9 +124,9 @@ fn detect(engine: &oar_ocr::oarocr::OAROCR, path: &Path) -> Result<Vec<Detection
 
 /// Load the models, or fail with the exact paths and how to get them.
 ///
-/// Nothing is downloaded here: `scripts/fetch_ocr_models.sh` is the one
-/// documented provisioning step, and a missing model must never silently
-/// resolve to different weights.
+/// Nothing is downloaded here: models are provisioned manually (see README
+/// "OCR"), and a missing model must never silently resolve to
+/// different weights.
 fn build_engine() -> Result<oar_ocr::oarocr::OAROCR> {
     use oar_ocr::oarocr::OAROCRBuilder;
 
@@ -134,10 +134,8 @@ fn build_engine() -> Result<oar_ocr::oarocr::OAROCR> {
     if !dir.is_dir() {
         bail!(
             "OCR model directory {} does not exist.\n\
-             Create it and fetch the models first:\n    \
-             OAR_MODEL_DIR={} ./scripts/fetch_ocr_models.sh\n\
-             (expects {} , {} and {} — see README \"OCR\").",
-            dir.display(),
+             Create it and download the models first (see README \"OCR\"):\n    \
+             it expects {} , {} and {} .",
             dir.display(),
             DET_MODEL,
             REC_MODEL,
@@ -157,11 +155,9 @@ fn build_engine() -> Result<oar_ocr::oarocr::OAROCR> {
     if !missing.is_empty() {
         bail!(
             "OCR models missing in {}:\n  {}\n\
-             Fetch them (one explicit step, needs network):\n    \
-             OAR_MODEL_DIR={} ./scripts/fetch_ocr_models.sh",
+             Download them yourself (see README \"OCR\").",
             dir.display(),
             missing.join("\n  "),
-            dir.display()
         );
     }
 
