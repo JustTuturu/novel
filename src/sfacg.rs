@@ -61,6 +61,7 @@ fn main_index_re() -> &'static Regex {
 }
 
 /// Drops the `(12)` popularity count SFACG appends to a catalog tag.
+#[cfg(test)]
 fn tag_count_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"\(\d+\)$").unwrap())
@@ -165,6 +166,7 @@ impl Sfacg {
 
     /// The catalog's tag chips. The `span.icn` glyph is not part of the name
     /// and a trailing `(N)` popularity count is dropped.
+    #[cfg(test)]
     fn parse_tags(&self, doc: &Html) -> Vec<String> {
         let chips = browser::selector("ul.tag-list > li.tag > a");
         let icon = browser::selector("span.icn");
@@ -421,6 +423,7 @@ fn doc_text(doc: &Html, sep: &str) -> String {
 
 /// [`el_text`] with whole subtrees removed — the Go port clones the tag chip,
 /// drops `span.icn`, and reads what is left.
+#[cfg(test)]
 fn text_excluding(el: ElementRef, skip: &Selector, sep: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     collect_text(*el, Some(skip), &mut parts);

@@ -15,7 +15,11 @@ pub struct Chapter {
     /// `None` mirrors Python's `is_paid: bool | None` ("catalog can't tell").
     pub is_paid: Option<bool>,
     pub section_name: String,
+    /// Populated for API completeness; read only by tests.
+    #[allow(dead_code)]
     pub section_number: usize,
+    /// Populated for API completeness; read only by tests.
+    #[allow(dead_code)]
     pub word_count: usize,
 }
 

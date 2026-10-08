@@ -183,6 +183,7 @@ const AUTHOR_CANDIDATES: &[MetaCandidate] = &[
     },
 ];
 
+#[cfg(test)]
 const INTRO_CANDIDATES: &[MetaCandidate] = &[
     MetaCandidate {
         attr: false,
